@@ -1,0 +1,1 @@
+"""MCP package — Model Context Protocol server for AI agent tools."""
