@@ -16,6 +16,9 @@ from typing import Any, Callable, List, Optional
 
 from backend.indexing.vector_store import VectorStore
 from backend.rag.pipeline import RAGPipeline
+from backend.github.client import GitHubAPI
+from backend.github.models import RepoCoord
+
 
 
 ToolExecutor = Callable[[dict], str]
@@ -175,13 +178,141 @@ def make_ask_codebase_tool(pipeline: RAGPipeline) -> Tool:
 
     
 
-def build_default_registry(store: VectorStore, pipeline: RAGPipeline) -> ToolRegistry:
+def build_default_registry(
+    store: VectorStore,
+    pipeline: RAGPipeline,
+    github: GitHubAPI | None = None,
+) -> ToolRegistry:
     """Build a registry pre-populated with the standard agent toolset."""
     reg = ToolRegistry()
     reg.register(make_search_code_tool(store))
     reg.register(make_get_chunk_tool(store))
     reg.register(make_ask_codebase_tool(pipeline))
+    if github is not None:
+        reg.register(make_github_get_file_tool(github))
+        reg.register(make_github_list_issues_tool(github))
+        reg.register(make_github_get_pr_tool(github))
     return reg
 
+    
+
+def make_github_get_file_tool(github: GitHubAPI) -> Tool:
+    """Tool: fetch a single file from a GitHub repo."""
+
+    def execute(params: dict) -> str:
+        owner = str(params.get("owner", "")).strip()
+        repo = str(params.get("repo", "")).strip()
+        path = str(params.get("path", "")).strip()
+        ref = params.get("ref")
+        if not owner or not repo or not path:
+            raise ValueError("Params 'owner', 'repo', and 'path' are required.")
+        if ref is not None:
+            ref = str(ref).strip() or None
+        try:
+            f = github.get_file(RepoCoord(owner=owner, repo=repo), path, ref=ref)
+        except FileNotFoundError as exc:
+            raise ValueError(str(exc)) from exc
+        header = f"{owner}/{repo}:{f.path}  (sha={f.sha[:8]}, size={f.size})"
+        return f"{header}\n\n{f.content}"
+
+    return Tool(
+        name="github_get_file",
+        description="Fetch a single file from a GitHub repository.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string", "description": "Repo owner or org login."},
+                "repo": {"type": "string", "description": "Repository name."},
+                "path": {"type": "string", "description": "File path within the repo."},
+                "ref": {"type": "string", "description": "Optional branch / tag / SHA."},
+            },
+            "required": ["owner", "repo", "path"],
+        },
+        execute=execute,
+    )
+
+
+def make_github_list_issues_tool(github: GitHubAPI) -> Tool:
+    """Tool: list issues on a GitHub repo."""
+
+    def execute(params: dict) -> str:
+        owner = str(params.get("owner", "")).strip()
+        repo = str(params.get("repo", "")).strip()
+        state = str(params.get("state", "open")).strip() or "open"
+        per_page = int(params.get("per_page", 30))
+        if not owner or not repo:
+            raise ValueError("Params 'owner' and 'repo' are required.")
+        if state not in ("open", "closed", "all"):
+            raise ValueError("state must be one of: open, closed, all")
+        if per_page < 1 or per_page > 100:
+            raise ValueError("per_page must be between 1 and 100")
+        issues = github.list_issues(
+            RepoCoord(owner=owner, repo=repo),
+            state=state,
+            per_page=per_page,
+        )
+        if not issues:
+            return f"No {state} issues found in {owner}/{repo}."
+        lines = [f"Found {len(issues)} {state} issue(s) in {owner}/{repo}:"]
+        for i in issues:
+            lines.append(f"  #{i.number}  [{i.state}]  {i.title}  (by {i.author})")
+        return "\n".join(lines)
+
+    return Tool(
+        name="github_list_issues",
+        description="List issues on a GitHub repository.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string"},
+                "repo": {"type": "string"},
+                "state": {"type": "string", "enum": ["open", "closed", "all"], "default": "open"},
+                "per_page": {"type": "integer", "minimum": 1, "maximum": 100, "default": 30},
+            },
+            "required": ["owner", "repo"],
+        },
+        execute=execute,
+    )
+
+
+def make_github_get_pr_tool(github: GitHubAPI) -> Tool:
+    """Tool: fetch a pull request by number."""
+
+    def execute(params: dict) -> str:
+        owner = str(params.get("owner", "")).strip()
+        repo = str(params.get("repo", "")).strip()
+        number = int(params.get("number", 0))
+        if not owner or not repo:
+            raise ValueError("Params 'owner' and 'repo' are required.")
+        if number < 1:
+            raise ValueError("PR 'number' must be >= 1.")
+        try:
+            pr = github.get_pr(RepoCoord(owner=owner, repo=repo), number)
+        except FileNotFoundError as exc:
+            raise ValueError(str(exc)) from exc
+        merged_str = "yes" if pr.merged else "no"
+        return (
+            f"PR #{pr.number}  [{pr.state}]  {pr.title}\n"
+            f"Author: {pr.author}\n"
+            f"Branch: {pr.head} -> {pr.base}\n"
+            f"Merged: {merged_str}\n"
+            f"URL: {pr.url}\n\n"
+            f"{pr.body}"
+        )
+
+    return Tool(
+        name="github_get_pr",
+        description="Fetch a pull request by its number.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "owner": {"type": "string"},
+                "repo": {"type": "string"},
+                "number": {"type": "integer", "minimum": 1},
+            },
+            "required": ["owner", "repo", "number"],
+        },
+        execute=execute,
+    )
 
 
