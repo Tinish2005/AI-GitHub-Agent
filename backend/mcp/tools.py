@@ -18,6 +18,10 @@ from backend.indexing.vector_store import VectorStore
 from backend.rag.pipeline import RAGPipeline
 from backend.github.client import GitHubAPI
 from backend.github.models import RepoCoord
+from backend.cloning.cloner import Cloner
+from backend.cloning.indexing_service import IndexingService
+from backend.agent.models import Plan
+from backend.agent.planner import Planner
 
 
 
@@ -182,6 +186,8 @@ def build_default_registry(
     store: VectorStore,
     pipeline: RAGPipeline,
     github: GitHubAPI | None = None,
+    indexer: IndexingService | None = None,
+    planner: Planner | None = None,
 ) -> ToolRegistry:
     """Build a registry pre-populated with the standard agent toolset."""
     reg = ToolRegistry()
@@ -192,8 +198,11 @@ def build_default_registry(
         reg.register(make_github_get_file_tool(github))
         reg.register(make_github_list_issues_tool(github))
         reg.register(make_github_get_pr_tool(github))
+    if indexer is not None:
+        reg.register(make_index_repo_tool(indexer))
+    if planner is not None:
+        reg.register(make_create_plan_tool(planner))
     return reg
-
     
 
 def make_github_get_file_tool(github: GitHubAPI) -> Tool:
@@ -315,4 +324,71 @@ def make_github_get_pr_tool(github: GitHubAPI) -> Tool:
         execute=execute,
     )
 
+
+def make_index_repo_tool(indexer: IndexingService) -> Tool:
+    """Tool: clone a GitHub repo and index it end-to-end."""
+
+    def execute(params: dict) -> str:
+        url = str(params.get("url", "")).strip()
+        force = bool(params.get("force", False))
+        if not url:
+            raise ValueError("Param 'url' is required and must be non-empty.")
+        result = indexer.index_repo(url, force=force)
+        cached = "yes" if result.was_cached else "no"
+        return (
+            f"Indexed {result.url}\n"
+            f"Local path: {result.local_path}\n"
+            f"Cached clone: {cached}\n"
+            f"Python files scanned: {result.files_scanned}\n"
+            f"Chunks indexed: {result.chunks_indexed}"
+        )
+
+    return Tool(
+        name="index_repo",
+        description="Clone a GitHub repo and index every Python file for search + RAG.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "HTTPS GitHub URL of the repo."},
+                "force": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "If true, re-clone even if already cached.",
+                },
+            },
+            "required": ["url"],
+        },
+        execute=execute,
+    )
+    
+
+def make_create_plan_tool(planner: Planner) -> Tool:
+    """Tool: turn a user goal into a structured Plan."""
+
+    def execute(params: dict) -> str:
+        goal = str(params.get("goal", "")).strip()
+        if not goal:
+            raise ValueError("Param 'goal' is required and must be non-empty.")
+        plan: Plan = planner.plan(goal)
+        lines = [
+            f"Plan for goal: {plan.goal}",
+            f"Strategy: {plan.strategy}",
+            f"Steps ({plan.step_count}):",
+        ]
+        for step in plan.steps:
+            lines.append(f"  {step.id}. [{step.kind.value}] {step.description}")
+        return "\n".join(lines)
+
+    return Tool(
+        name="create_plan",
+        description="Turn a user goal into a structured multi-step execution plan.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "goal": {"type": "string", "description": "The user's goal in plain English."},
+            },
+            "required": ["goal"],
+        },
+        execute=execute,
+    )
 
