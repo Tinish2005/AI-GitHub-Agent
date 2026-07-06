@@ -22,6 +22,8 @@ from backend.cloning.cloner import Cloner
 from backend.cloning.indexing_service import IndexingService
 from backend.agent.models import Plan
 from backend.agent.planner import Planner
+from backend.agent.engine import ExecutionEngine, ExecutionResult
+from backend.agent.models import Plan
 
 
 
@@ -188,6 +190,7 @@ def build_default_registry(
     github: GitHubAPI | None = None,
     indexer: IndexingService | None = None,
     planner: Planner | None = None,
+    engine: ExecutionEngine | None = None,
 ) -> ToolRegistry:
     """Build a registry pre-populated with the standard agent toolset."""
     reg = ToolRegistry()
@@ -202,8 +205,9 @@ def build_default_registry(
         reg.register(make_index_repo_tool(indexer))
     if planner is not None:
         reg.register(make_create_plan_tool(planner))
+    if planner is not None and engine is not None:
+        reg.register(make_execute_plan_tool(planner, engine))
     return reg
-    
 
 def make_github_get_file_tool(github: GitHubAPI) -> Tool:
     """Tool: fetch a single file from a GitHub repo."""
@@ -382,6 +386,45 @@ def make_create_plan_tool(planner: Planner) -> Tool:
     return Tool(
         name="create_plan",
         description="Turn a user goal into a structured multi-step execution plan.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "goal": {"type": "string", "description": "The user's goal in plain English."},
+            },
+            "required": ["goal"],
+        },
+        execute=execute,
+    )
+
+    
+
+def make_execute_plan_tool(planner: Planner, engine: ExecutionEngine) -> Tool:
+    """Tool: plan + execute in one call."""
+
+    def execute(params: dict) -> str:
+        goal = str(params.get("goal", "")).strip()
+        if not goal:
+            raise ValueError("Param 'goal' is required and must be non-empty.")
+        plan: Plan = planner.plan(goal)
+        result: ExecutionResult = engine.run(plan)
+        lines = [
+            f"Goal: {result.goal}",
+            f"Strategy: {result.strategy}",
+            f"Steps: {result.total_steps}  Completed: {result.completed}  Failed: {result.failed}  Aborted: {result.aborted}",
+            "",
+        ]
+        for r in result.steps:
+            head = f"[{r.status.value}] step {r.step_id} ({r.kind.value})"
+            if r.status.value == "failed":
+                lines.append(f"{head} - error: {r.error}")
+            else:
+                short = r.output.splitlines()[0][:120] if r.output else "(no output)"
+                lines.append(f"{head} - {short}")
+        return "\n".join(lines)
+
+    return Tool(
+        name="execute_plan",
+        description="Plan the goal and execute the plan end-to-end. Returns per-step status.",
         input_schema={
             "type": "object",
             "properties": {
