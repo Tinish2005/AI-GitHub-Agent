@@ -26,6 +26,8 @@ from backend.agent.engine import ExecutionEngine, ExecutionResult
 from backend.agent.models import Plan
 from backend.agent.fix_generator import FixGenerator
 from backend.agent.fix_models import FixProposal
+from backend.agent.validation_pipeline import ValidationPipeline
+from backend.agent.validation_models import ValidationResult
 
 
 
@@ -193,6 +195,7 @@ def build_default_registry(
     planner: Planner | None = None,
     engine: ExecutionEngine | None = None,
     generator: FixGenerator | None = None,
+    validator: ValidationPipeline | None = None,
 ) -> ToolRegistry:
     """Build a registry pre-populated with the standard agent toolset."""
     reg = ToolRegistry()
@@ -211,6 +214,8 @@ def build_default_registry(
         reg.register(make_execute_plan_tool(planner, engine))
     if generator is not None:
         reg.register(make_propose_fix_tool(generator))
+    if generator is not None and validator is not None:
+        reg.register(make_validate_fix_tool(generator, validator))
     return reg
 
 def make_github_get_file_tool(github: GitHubAPI) -> Tool:
@@ -479,3 +484,43 @@ def make_propose_fix_tool(generator: FixGenerator) -> Tool:
         execute=execute,
     )
 
+
+def make_validate_fix_tool(generator: FixGenerator, validator: ValidationPipeline) -> Tool:
+    """Tool: generate a fix for the goal and validate it end-to-end."""
+
+    def execute(params: dict) -> str:
+        goal = str(params.get("goal", "")).strip()
+        context = str(params.get("context", "")).strip()
+        if not goal:
+            raise ValueError("Param 'goal' is required and must be non-empty.")
+        proposal = generator.propose(goal, context)
+        result: ValidationResult = validator.validate(proposal)
+        head = (
+            f"Validation for goal: {goal}\n"
+            f"Proposal valid: {proposal.is_valid}  files_changed: {proposal.files_changed}\n"
+            f"Validation passed: {result.passed}  score: {result.score:.2f}\n"
+        )
+        if result.error:
+            head += f"[!] fatal: {result.error}\n"
+        lines = [head, "Checks:"]
+        for c in result.checks:
+            marker = "[skipped]" if c.skipped else ("[pass]" if c.passed else "[fail]")
+            lines.append(f"  {marker} {c.name}: {c.message}")
+        return "\n".join(lines)
+
+    return Tool(
+        name="validate_fix",
+        description="Generate a fix for the goal and validate it in a sandbox.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "goal": {"type": "string", "description": "The user goal / bug description."},
+                "context": {
+                    "type": "string",
+                    "description": "Optional retrieved code context for the generator.",
+                },
+            },
+            "required": ["goal"],
+        },
+        execute=execute,
+    )

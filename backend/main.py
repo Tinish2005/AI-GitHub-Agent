@@ -31,6 +31,8 @@ from backend.agent.executor import make_default_executors
 from backend.agent.engine import ExecutionEngine, ExecutionResult
 from backend.agent.fix_generator import FixGenerator
 from backend.agent.fix_models import FixProposal
+from backend.agent.validation_pipeline import ValidationPipeline
+from backend.agent.validation_models import ValidationResult
 
 
 class HealthResponse(BaseModel):
@@ -62,24 +64,25 @@ class ExecuteRequest(BaseModel):
 
 
 class FixProposeRequest(BaseModel):
-    """Body for POST /fix/propose."""
+    goal: str = Field(min_length=1)
+    context: str = Field(default="")
 
-    goal: str = Field(min_length=1, description="The user's goal / bug description.")
+
+class FixValidateRequest(BaseModel):
+    """Body for POST /fix/validate."""
+
+    goal: str = Field(min_length=1, description="The user goal / bug description.")
     context: str = Field(default="", description="Optional retrieved code context.")
 
 
-def get_vector_store(
-    settings: Annotated[Settings, Depends(get_settings)],
-) -> VectorStore:
+def get_vector_store(settings: Annotated[Settings, Depends(get_settings)]) -> VectorStore:
     return VectorStore(
         persist_directory=settings.vector_db_path,
         embedding_service=EmbeddingService(),
     )
 
 
-def get_llm_client(
-    settings: Annotated[Settings, Depends(get_settings)],
-) -> LLMClient:
+def get_llm_client(settings: Annotated[Settings, Depends(get_settings)]) -> LLMClient:
     key = settings.openai_api_key.get_secret_value()
     if key:
         return OpenAILLMClient(api_key=key)
@@ -93,16 +96,12 @@ def get_rag_pipeline(
     return RAGPipeline(vector_store=vector_store, llm=llm)
 
 
-def get_github_client(
-    settings: Annotated[Settings, Depends(get_settings)],
-) -> GitHubAPI:
+def get_github_client(settings: Annotated[Settings, Depends(get_settings)]) -> GitHubAPI:
     token = settings.github_token.get_secret_value() or None
     return GitHubClient(token=token)
 
 
-def get_cloner(
-    settings: Annotated[Settings, Depends(get_settings)],
-) -> Cloner:
+def get_cloner(settings: Annotated[Settings, Depends(get_settings)]) -> Cloner:
     return GitCloner(cache_dir=settings.repo_cache_path)
 
 
@@ -113,16 +112,17 @@ def get_indexing_service(
     return IndexingService(cloner=cloner, vector_store=vector_store)
 
 
-def get_planner(
-    llm: Annotated[LLMClient, Depends(get_llm_client)],
-) -> Planner:
+def get_planner(llm: Annotated[LLMClient, Depends(get_llm_client)]) -> Planner:
     return RuleBasedPlanner()
 
 
-def get_fix_generator(
-    llm: Annotated[LLMClient, Depends(get_llm_client)],
-) -> FixGenerator:
+def get_fix_generator(llm: Annotated[LLMClient, Depends(get_llm_client)]) -> FixGenerator:
     return FixGenerator(llm=llm)
+
+
+def get_validation_pipeline() -> ValidationPipeline:
+    """Default: no base_root, uses default checks (syntax + imports + placeholders)."""
+    return ValidationPipeline()
 
 
 def get_execution_engine(
@@ -130,9 +130,11 @@ def get_execution_engine(
     pipeline: Annotated[RAGPipeline, Depends(get_rag_pipeline)],
     github: Annotated[GitHubAPI, Depends(get_github_client)],
     generator: Annotated[FixGenerator, Depends(get_fix_generator)],
+    validator: Annotated[ValidationPipeline, Depends(get_validation_pipeline)],
 ) -> ExecutionEngine:
     executors = make_default_executors(
-        vector_store, pipeline, github=github, generator=generator,
+        vector_store, pipeline,
+        github=github, generator=generator, validation_pipeline=validator,
     )
     return ExecutionEngine(executors=executors)
 
@@ -145,11 +147,12 @@ def get_mcp_server(
     planner: Annotated[Planner, Depends(get_planner)],
     engine: Annotated[ExecutionEngine, Depends(get_execution_engine)],
     generator: Annotated[FixGenerator, Depends(get_fix_generator)],
+    validator: Annotated[ValidationPipeline, Depends(get_validation_pipeline)],
 ) -> MCPServer:
     registry = build_default_registry(
         vector_store, pipeline,
         github=github, indexer=indexer, planner=planner,
-        engine=engine, generator=generator,
+        engine=engine, generator=generator, validator=validator,
     )
     return MCPServer(registry=registry)
 
@@ -282,11 +285,23 @@ def create_app() -> FastAPI:
         body: FixProposeRequest,
         generator: Annotated[FixGenerator, Depends(get_fix_generator)],
     ) -> FixProposal:
-        """Ask the LLM to propose a fix as a unified diff."""
         try:
             return generator.propose(body.goal, body.context)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/fix/validate", response_model=ValidationResult, tags=["agent"])
+    def fix_validate_endpoint(
+        body: FixValidateRequest,
+        generator: Annotated[FixGenerator, Depends(get_fix_generator)],
+        validator: Annotated[ValidationPipeline, Depends(get_validation_pipeline)],
+    ) -> ValidationResult:
+        """Generate a fix + validate it in a sandbox. Returns per-check results."""
+        try:
+            proposal = generator.propose(body.goal, body.context)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return validator.validate(proposal)
 
     return app
 

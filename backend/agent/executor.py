@@ -11,6 +11,8 @@ from backend.github.models import RepoCoord
 from backend.indexing.vector_store import VectorStore
 from backend.rag.pipeline import RAGPipeline
 from backend.agent.fix_generator import FixGenerator
+from backend.agent.validation_models import ValidationResult
+from backend.agent.validation_pipeline import ValidationPipeline
 
 
 
@@ -145,12 +147,50 @@ class GenerateExecutor:
         return str(prior_outputs[latest_id])
 
 
+class ValidateExecutor:
+    """
+    Runs a ValidationPipeline against a FixProposal produced by an
+    earlier GENERATE step.
+
+    Convention: the GENERATE step stores its FixProposal into
+    prior_outputs[<step.id>] as its string summary. For validation we
+    need the actual FixProposal object, so this executor takes the
+    generator's proposal directly via a shared reference in
+    context.prior_outputs under the key 'fix_proposal' when available.
+    Otherwise it reports "no proposal to validate".
+    """
+
+    kind: StepKind = StepKind.VALIDATE
+
+    def __init__(self, pipeline: ValidationPipeline) -> None:
+        self.pipeline = pipeline
+
+    def run(self, context: StepContext) -> str:
+        proposal = context.prior_outputs.get("fix_proposal")
+        if proposal is None:
+            return "[validate] no FixProposal found in prior outputs; skipping."
+        result: ValidationResult = self.pipeline.validate(proposal)
+        head = (
+            f"Validation (passed={result.passed}, "
+            f"score={result.score:.2f}, "
+            f"checks={result.total_checks})"
+        )
+        lines = [head]
+        if result.error:
+            lines.append(f"[!] fatal: {result.error}")
+        for c in result.checks:
+            marker = "[skipped]" if c.skipped else ("[pass]" if c.passed else "[fail]")
+            lines.append(f"  {marker} {c.name}: {c.message}")
+        return "\n".join(lines)
+
+
 def make_default_executors(
     vector_store: VectorStore,
     pipeline: RAGPipeline,
     github: GitHubAPI | None = None,
     coord: RepoCoord | None = None,
     generator: FixGenerator | None = None,
+    validation_pipeline: ValidationPipeline | None = None,
 ) -> dict:
     """Build the default map of StepKind -> StepExecutor."""
     executors: dict = {
@@ -170,9 +210,12 @@ def make_default_executors(
         executors[StepKind.GENERATE] = PlannedExecutor(
             StepKind.GENERATE, "wire a FixGenerator to enable diff generation.",
         )
-    executors[StepKind.VALIDATE] = PlannedExecutor(
-        StepKind.VALIDATE, "Loop 12 will implement build/tests/lint validation.",
-    )
+    if validation_pipeline is not None:
+        executors[StepKind.VALIDATE] = ValidateExecutor(validation_pipeline)
+    else:
+        executors[StepKind.VALIDATE] = PlannedExecutor(
+            StepKind.VALIDATE, "wire a ValidationPipeline to enable fix validation.",
+        )
     executors[StepKind.HUMAN_APPROVAL] = PlannedExecutor(
         StepKind.HUMAN_APPROVAL, "human approval is handled outside the engine.",
     )
