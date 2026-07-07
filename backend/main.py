@@ -33,6 +33,10 @@ from backend.agent.fix_generator import FixGenerator
 from backend.agent.fix_models import FixProposal
 from backend.agent.validation_pipeline import ValidationPipeline
 from backend.agent.validation_models import ValidationResult
+from backend.agent.draft_pr_models import DraftPRRequest, DraftPRResult
+from backend.agent.draft_pr_service import (
+    DraftPRService, FakeDraftPRService, GitHubDraftPRService,
+)
 
 
 class HealthResponse(BaseModel):
@@ -69,10 +73,18 @@ class FixProposeRequest(BaseModel):
 
 
 class FixValidateRequest(BaseModel):
-    """Body for POST /fix/validate."""
+    goal: str = Field(min_length=1)
+    context: str = Field(default="")
+
+
+class FixPRRequest(BaseModel):
+    """Body for POST /fix/pr."""
 
     goal: str = Field(min_length=1, description="The user goal / bug description.")
     context: str = Field(default="", description="Optional retrieved code context.")
+    owner: str = Field(min_length=1, description="Target GitHub owner or org login.")
+    repo: str = Field(min_length=1, description="Target repository name.")
+    base_branch: str = Field(default="main", description="Base branch to open the PR against.")
 
 
 def get_vector_store(settings: Annotated[Settings, Depends(get_settings)]) -> VectorStore:
@@ -121,8 +133,15 @@ def get_fix_generator(llm: Annotated[LLMClient, Depends(get_llm_client)]) -> Fix
 
 
 def get_validation_pipeline() -> ValidationPipeline:
-    """Default: no base_root, uses default checks (syntax + imports + placeholders)."""
     return ValidationPipeline()
+
+
+def get_draft_pr_service(settings: Annotated[Settings, Depends(get_settings)]) -> DraftPRService:
+    """Real GitHub service if token set, otherwise FakeDraftPRService."""
+    token = settings.github_token.get_secret_value() or ""
+    if token:
+        return GitHubDraftPRService(token=token)
+    return FakeDraftPRService()
 
 
 def get_execution_engine(
@@ -148,11 +167,13 @@ def get_mcp_server(
     engine: Annotated[ExecutionEngine, Depends(get_execution_engine)],
     generator: Annotated[FixGenerator, Depends(get_fix_generator)],
     validator: Annotated[ValidationPipeline, Depends(get_validation_pipeline)],
+    draft_pr: Annotated[DraftPRService, Depends(get_draft_pr_service)],
 ) -> MCPServer:
     registry = build_default_registry(
         vector_store, pipeline,
         github=github, indexer=indexer, planner=planner,
         engine=engine, generator=generator, validator=validator,
+        draft_pr_service=draft_pr,
     )
     return MCPServer(registry=registry)
 
@@ -168,9 +189,7 @@ def create_app() -> FastAPI:
     )
 
     @app.get("/", response_model=HealthResponse, tags=["meta"])
-    def root(
-        settings: Annotated[Settings, Depends(get_settings)],
-    ) -> HealthResponse:
+    def root(settings: Annotated[Settings, Depends(get_settings)]) -> HealthResponse:
         return HealthResponse(
             status="ok",
             app_name=settings.app_name,
@@ -179,9 +198,7 @@ def create_app() -> FastAPI:
         )
 
     @app.get("/health", response_model=HealthResponse, tags=["meta"])
-    def health(
-        settings: Annotated[Settings, Depends(get_settings)],
-    ) -> HealthResponse:
+    def health(settings: Annotated[Settings, Depends(get_settings)]) -> HealthResponse:
         return HealthResponse(
             status="ok",
             app_name=settings.app_name,
@@ -213,9 +230,7 @@ def create_app() -> FastAPI:
 
     @app.get("/github/file", response_model=GitHubFile, tags=["github"])
     def github_file(
-        owner: str,
-        repo: str,
-        path: str,
+        owner: str, repo: str, path: str,
         github: Annotated[GitHubAPI, Depends(get_github_client)],
         ref: str | None = None,
     ) -> GitHubFile:
@@ -296,12 +311,37 @@ def create_app() -> FastAPI:
         generator: Annotated[FixGenerator, Depends(get_fix_generator)],
         validator: Annotated[ValidationPipeline, Depends(get_validation_pipeline)],
     ) -> ValidationResult:
-        """Generate a fix + validate it in a sandbox. Returns per-check results."""
         try:
             proposal = generator.propose(body.goal, body.context)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return validator.validate(proposal)
+
+    @app.post("/fix/pr", response_model=DraftPRResult, tags=["agent"])
+    def fix_pr_endpoint(
+        body: FixPRRequest,
+        generator: Annotated[FixGenerator, Depends(get_fix_generator)],
+        validator: Annotated[ValidationPipeline, Depends(get_validation_pipeline)],
+        service: Annotated[DraftPRService, Depends(get_draft_pr_service)],
+    ) -> DraftPRResult:
+        """End-to-end: propose fix, validate it, open a draft PR."""
+        try:
+            proposal = generator.propose(body.goal, body.context)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        validation = validator.validate(proposal)
+        request = DraftPRRequest(
+            owner=body.owner,
+            repo=body.repo,
+            base_branch=body.base_branch,
+            goal=body.goal,
+            proposal_explanation=proposal.explanation,
+            proposal_diff=proposal.diff,
+            confidence=proposal.confidence,
+            validation_passed=validation.passed,
+            validation_score=validation.score,
+        )
+        return service.create(request)
 
     return app
 

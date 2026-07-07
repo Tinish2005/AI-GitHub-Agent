@@ -28,6 +28,8 @@ from backend.agent.fix_generator import FixGenerator
 from backend.agent.fix_models import FixProposal
 from backend.agent.validation_pipeline import ValidationPipeline
 from backend.agent.validation_models import ValidationResult
+from backend.agent.draft_pr_service import DraftPRService
+from backend.agent.draft_pr_models import DraftPRResult
 
 
 
@@ -196,6 +198,7 @@ def build_default_registry(
     engine: ExecutionEngine | None = None,
     generator: FixGenerator | None = None,
     validator: ValidationPipeline | None = None,
+    draft_pr_service: DraftPRService | None = None,
 ) -> ToolRegistry:
     """Build a registry pre-populated with the standard agent toolset."""
     reg = ToolRegistry()
@@ -216,6 +219,8 @@ def build_default_registry(
         reg.register(make_propose_fix_tool(generator))
     if generator is not None and validator is not None:
         reg.register(make_validate_fix_tool(generator, validator))
+    if generator is not None and validator is not None and draft_pr_service is not None:
+        reg.register(make_draft_pr_tool(generator, validator, draft_pr_service))
     return reg
 
 def make_github_get_file_tool(github: GitHubAPI) -> Tool:
@@ -524,3 +529,71 @@ def make_validate_fix_tool(generator: FixGenerator, validator: ValidationPipelin
         },
         execute=execute,
     )
+    
+
+def make_draft_pr_tool(
+    generator: FixGenerator,
+    validator: ValidationPipeline,
+    service: DraftPRService,
+) -> Tool:
+    """Tool: end-to-end propose + validate + open draft PR."""
+
+    def execute(params: dict) -> str:
+        goal = str(params.get("goal", "")).strip()
+        context = str(params.get("context", "")).strip()
+        owner = str(params.get("owner", "")).strip()
+        repo = str(params.get("repo", "")).strip()
+        base = str(params.get("base_branch", "main")).strip() or "main"
+        if not goal:
+            raise ValueError("Param 'goal' is required and must be non-empty.")
+        if not owner or not repo:
+            raise ValueError("Params 'owner' and 'repo' are required.")
+
+        proposal = generator.propose(goal, context)
+        validation = validator.validate(proposal)
+
+        from backend.agent.draft_pr_models import DraftPRRequest
+        req = DraftPRRequest(
+            owner=owner, repo=repo, base_branch=base,
+            goal=goal,
+            proposal_explanation=proposal.explanation,
+            proposal_diff=proposal.diff,
+            confidence=proposal.confidence,
+            validation_passed=validation.passed,
+            validation_score=validation.score,
+        )
+        result: DraftPRResult = service.create(req)
+        lines = [
+            f"Draft PR request for {owner}/{repo} on base '{base}':",
+            f"  proposal.is_valid: {proposal.is_valid}",
+            f"  validation.passed: {validation.passed}  score: {validation.score:.2f}",
+            f"  created: {result.created}",
+        ]
+        if result.created:
+            lines.append(f"  #{result.pr_number}: {result.title}")
+            lines.append(f"  branch: {result.branch}")
+            lines.append(f"  url: {result.pr_url}")
+        else:
+            if result.skipped_reason:
+                lines.append(f"  skipped: {result.skipped_reason}")
+            if result.error:
+                lines.append(f"  error: {result.error}")
+        return "\n".join(lines)
+
+    return Tool(
+        name="draft_pr",
+        description="Propose a fix, validate it, and open a draft PR on GitHub.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "goal": {"type": "string"},
+                "context": {"type": "string"},
+                "owner": {"type": "string"},
+                "repo": {"type": "string"},
+                "base_branch": {"type": "string", "default": "main"},
+            },
+            "required": ["goal", "owner", "repo"],
+        },
+        execute=execute,
+    )
+

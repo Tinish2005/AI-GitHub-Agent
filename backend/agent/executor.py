@@ -11,9 +11,10 @@ from backend.github.models import RepoCoord
 from backend.indexing.vector_store import VectorStore
 from backend.rag.pipeline import RAGPipeline
 from backend.agent.fix_generator import FixGenerator
-from backend.agent.validation_models import ValidationResult
 from backend.agent.validation_pipeline import ValidationPipeline
-
+from backend.agent.validation_models import ValidationResult
+from backend.agent.draft_pr_models import DraftPRRequest, DraftPRResult
+from backend.agent.draft_pr_service import DraftPRService
 
 
 @dataclass(frozen=True)
@@ -98,24 +99,8 @@ class GitHubReadExecutor:
         return "\n".join(lines)
 
 
-class PlannedExecutor:
-    """A honest not-yet-implemented executor for Loops 11-13 kinds."""
-
-    def __init__(self, kind: StepKind, note: str) -> None:
-        self.kind = kind
-        self.note = note
-
-    def run(self, context: StepContext) -> str:
-        return f"[planned] {self.kind.value}: {self.note}"
-
 class GenerateExecutor:
-    """
-    Runs FixGenerator against the goal and prior retrieval output.
-
-    Uses the output of the previous RETRIEVE step (step id 1 by convention)
-    as the code context. If no prior retrieval output exists, passes an
-    empty context and lets the LLM decide what to do.
-    """
+    """Runs FixGenerator using the goal and prior RETRIEVE output."""
 
     kind: StepKind = StepKind.GENERATE
 
@@ -140,25 +125,17 @@ class GenerateExecutor:
     def _pick_context(prior_outputs: dict) -> str:
         if not prior_outputs:
             return ""
-        # Prefer the RETRIEVE step (id 1 by convention). Fall back to newest.
         if 1 in prior_outputs:
             return str(prior_outputs[1])
-        latest_id = max(prior_outputs.keys())
+        int_keys = [k for k in prior_outputs.keys() if isinstance(k, int)]
+        if not int_keys:
+            return ""
+        latest_id = max(int_keys)
         return str(prior_outputs[latest_id])
 
 
 class ValidateExecutor:
-    """
-    Runs a ValidationPipeline against a FixProposal produced by an
-    earlier GENERATE step.
-
-    Convention: the GENERATE step stores its FixProposal into
-    prior_outputs[<step.id>] as its string summary. For validation we
-    need the actual FixProposal object, so this executor takes the
-    generator's proposal directly via a shared reference in
-    context.prior_outputs under the key 'fix_proposal' when available.
-    Otherwise it reports "no proposal to validate".
-    """
+    """Runs a ValidationPipeline against a FixProposal from prior_outputs."""
 
     kind: StepKind = StepKind.VALIDATE
 
@@ -184,6 +161,69 @@ class ValidateExecutor:
         return "\n".join(lines)
 
 
+class DraftPRExecutor:
+    """Runs a DraftPRService against outputs of prior steps."""
+
+    kind: StepKind = StepKind.DRAFT_PR
+
+    def __init__(
+        self,
+        service: DraftPRService,
+        *,
+        owner: str,
+        repo: str,
+        base_branch: str = "main",
+    ) -> None:
+        if not owner or not repo:
+            raise ValueError("owner and repo must be provided.")
+        self.service = service
+        self.owner = owner
+        self.repo = repo
+        self.base_branch = base_branch
+
+    def run(self, context: StepContext) -> str:
+        proposal = context.prior_outputs.get("fix_proposal")
+        validation = context.prior_outputs.get("validation_result")
+        if proposal is None:
+            return "[draft_pr] no FixProposal in prior outputs; skipping."
+        if validation is None:
+            return "[draft_pr] no ValidationResult in prior outputs; skipping."
+        request = DraftPRRequest(
+            owner=self.owner,
+            repo=self.repo,
+            base_branch=self.base_branch,
+            goal=context.goal,
+            proposal_explanation=proposal.explanation,
+            proposal_diff=proposal.diff,
+            confidence=proposal.confidence,
+            validation_passed=validation.passed,
+            validation_score=validation.score,
+        )
+        result: DraftPRResult = self.service.create(request)
+        lines = [f"Draft PR (created={result.created})"]
+        if result.created:
+            lines.append(f"  #{result.pr_number}  {result.title}")
+            lines.append(f"  branch: {result.branch}")
+            lines.append(f"  url: {result.pr_url}")
+        else:
+            if result.skipped_reason:
+                lines.append(f"  skipped: {result.skipped_reason}")
+            if result.error:
+                lines.append(f"  error: {result.error}")
+        return "\n".join(lines)
+
+
+class PlannedExecutor:
+    """A honest not-yet-implemented executor placeholder."""
+
+    def __init__(self, kind: StepKind, note: str) -> None:
+        self.kind = kind
+        self.note = note
+
+    def run(self, context: StepContext) -> str:
+        return f"[planned] {self.kind.value}: {self.note}"
+
+
 def make_default_executors(
     vector_store: VectorStore,
     pipeline: RAGPipeline,
@@ -191,6 +231,10 @@ def make_default_executors(
     coord: RepoCoord | None = None,
     generator: FixGenerator | None = None,
     validation_pipeline: ValidationPipeline | None = None,
+    draft_pr_service: DraftPRService | None = None,
+    draft_pr_owner: str | None = None,
+    draft_pr_repo: str | None = None,
+    draft_pr_base_branch: str = "main",
 ) -> dict:
     """Build the default map of StepKind -> StepExecutor."""
     executors: dict = {
@@ -219,7 +263,16 @@ def make_default_executors(
     executors[StepKind.HUMAN_APPROVAL] = PlannedExecutor(
         StepKind.HUMAN_APPROVAL, "human approval is handled outside the engine.",
     )
-    executors[StepKind.DRAFT_PR] = PlannedExecutor(
-        StepKind.DRAFT_PR, "Loop 13 will implement draft PR creation via GitHub API.",
-    )
+    if draft_pr_service is not None and draft_pr_owner and draft_pr_repo:
+        executors[StepKind.DRAFT_PR] = DraftPRExecutor(
+            draft_pr_service,
+            owner=draft_pr_owner,
+            repo=draft_pr_repo,
+            base_branch=draft_pr_base_branch,
+        )
+    else:
+        executors[StepKind.DRAFT_PR] = PlannedExecutor(
+            StepKind.DRAFT_PR,
+            "wire a DraftPRService + owner/repo to enable draft PR creation.",
+        )
     return executors
