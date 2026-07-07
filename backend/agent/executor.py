@@ -10,6 +10,8 @@ from backend.github.client import GitHubAPI
 from backend.github.models import RepoCoord
 from backend.indexing.vector_store import VectorStore
 from backend.rag.pipeline import RAGPipeline
+from backend.agent.fix_generator import FixGenerator
+
 
 
 @dataclass(frozen=True)
@@ -104,12 +106,51 @@ class PlannedExecutor:
     def run(self, context: StepContext) -> str:
         return f"[planned] {self.kind.value}: {self.note}"
 
+class GenerateExecutor:
+    """
+    Runs FixGenerator against the goal and prior retrieval output.
+
+    Uses the output of the previous RETRIEVE step (step id 1 by convention)
+    as the code context. If no prior retrieval output exists, passes an
+    empty context and lets the LLM decide what to do.
+    """
+
+    kind: StepKind = StepKind.GENERATE
+
+    def __init__(self, generator: FixGenerator) -> None:
+        self.generator = generator
+
+    def run(self, context: StepContext) -> str:
+        prior_context = self._pick_context(context.prior_outputs)
+        proposal = self.generator.propose(context.goal, prior_context)
+        head = (
+            f"Fix proposal (model={proposal.model}, "
+            f"confidence={proposal.confidence:.2f}, "
+            f"files_changed={proposal.files_changed}, "
+            f"is_valid={proposal.is_valid})"
+        )
+        body = proposal.explanation
+        if not proposal.is_valid:
+            body += f"\n\n[!] Validation error: {proposal.validation_error}"
+        return f"{head}\n\n{body}"
+
+    @staticmethod
+    def _pick_context(prior_outputs: dict) -> str:
+        if not prior_outputs:
+            return ""
+        # Prefer the RETRIEVE step (id 1 by convention). Fall back to newest.
+        if 1 in prior_outputs:
+            return str(prior_outputs[1])
+        latest_id = max(prior_outputs.keys())
+        return str(prior_outputs[latest_id])
+
 
 def make_default_executors(
     vector_store: VectorStore,
     pipeline: RAGPipeline,
     github: GitHubAPI | None = None,
     coord: RepoCoord | None = None,
+    generator: FixGenerator | None = None,
 ) -> dict:
     """Build the default map of StepKind -> StepExecutor."""
     executors: dict = {
@@ -123,9 +164,12 @@ def make_default_executors(
             StepKind.GITHUB_READ,
             "no GitHub client configured on this server.",
         )
-    executors[StepKind.GENERATE] = PlannedExecutor(
-        StepKind.GENERATE, "Loop 11 will implement LLM-based fix generation.",
-    )
+    if generator is not None:
+        executors[StepKind.GENERATE] = GenerateExecutor(generator)
+    else:
+        executors[StepKind.GENERATE] = PlannedExecutor(
+            StepKind.GENERATE, "wire a FixGenerator to enable diff generation.",
+        )
     executors[StepKind.VALIDATE] = PlannedExecutor(
         StepKind.VALIDATE, "Loop 12 will implement build/tests/lint validation.",
     )

@@ -29,11 +29,11 @@ from backend.agent.models import Plan
 from backend.agent.planner import LLMPlanner, Planner, RuleBasedPlanner
 from backend.agent.executor import make_default_executors
 from backend.agent.engine import ExecutionEngine, ExecutionResult
+from backend.agent.fix_generator import FixGenerator
+from backend.agent.fix_models import FixProposal
 
 
 class HealthResponse(BaseModel):
-    """Schema returned by the /health endpoint."""
-
     status: str
     app_name: str
     version: str
@@ -41,32 +41,31 @@ class HealthResponse(BaseModel):
 
 
 class QARequest(BaseModel):
-    """Body for POST /qa."""
-
-    question: str = Field(min_length=1, description="The user question.")
-    top_k: int = Field(default=5, ge=1, le=20, description="How many chunks to retrieve.")
+    question: str = Field(min_length=1)
+    top_k: int = Field(default=5, ge=1, le=20)
 
 
 class IndexRequest(BaseModel):
-    """Body for POST /index."""
-
-    url: str = Field(min_length=1, description="HTTPS GitHub URL to clone and index.")
-    force: bool = Field(default=False, description="Re-clone even if cached.")
+    url: str = Field(min_length=1)
+    force: bool = Field(default=False)
 
 
 class PlanRequest(BaseModel):
-    """Body for POST /plan."""
-
-    goal: str = Field(min_length=1, description="The user's goal in plain English.")
-    strategy: str = Field(default="rule_based", description="rule_based | llm")
+    goal: str = Field(min_length=1)
+    strategy: str = Field(default="rule_based")
 
 
 class ExecuteRequest(BaseModel):
-    """Body for POST /execute."""
+    goal: str = Field(min_length=1)
+    strategy: str = Field(default="rule_based")
+    abort_on_failure: bool = Field(default=True)
 
-    goal: str = Field(min_length=1, description="The user's goal in plain English.")
-    strategy: str = Field(default="rule_based", description="rule_based | llm")
-    abort_on_failure: bool = Field(default=True, description="Stop on the first failure.")
+
+class FixProposeRequest(BaseModel):
+    """Body for POST /fix/propose."""
+
+    goal: str = Field(min_length=1, description="The user's goal / bug description.")
+    context: str = Field(default="", description="Optional retrieved code context.")
 
 
 def get_vector_store(
@@ -120,12 +119,21 @@ def get_planner(
     return RuleBasedPlanner()
 
 
+def get_fix_generator(
+    llm: Annotated[LLMClient, Depends(get_llm_client)],
+) -> FixGenerator:
+    return FixGenerator(llm=llm)
+
+
 def get_execution_engine(
     vector_store: Annotated[VectorStore, Depends(get_vector_store)],
     pipeline: Annotated[RAGPipeline, Depends(get_rag_pipeline)],
     github: Annotated[GitHubAPI, Depends(get_github_client)],
+    generator: Annotated[FixGenerator, Depends(get_fix_generator)],
 ) -> ExecutionEngine:
-    executors = make_default_executors(vector_store, pipeline, github=github)
+    executors = make_default_executors(
+        vector_store, pipeline, github=github, generator=generator,
+    )
     return ExecutionEngine(executors=executors)
 
 
@@ -136,10 +144,12 @@ def get_mcp_server(
     indexer: Annotated[IndexingService, Depends(get_indexing_service)],
     planner: Annotated[Planner, Depends(get_planner)],
     engine: Annotated[ExecutionEngine, Depends(get_execution_engine)],
+    generator: Annotated[FixGenerator, Depends(get_fix_generator)],
 ) -> MCPServer:
     registry = build_default_registry(
         vector_store, pipeline,
-        github=github, indexer=indexer, planner=planner, engine=engine,
+        github=github, indexer=indexer, planner=planner,
+        engine=engine, generator=generator,
     )
     return MCPServer(registry=registry)
 
@@ -242,10 +252,7 @@ def create_app() -> FastAPI:
         elif body.strategy == "rule_based":
             planner = RuleBasedPlanner()
         else:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unknown strategy: {body.strategy}",
-            )
+            raise HTTPException(status_code=400, detail=f"Unknown strategy: {body.strategy}")
         try:
             return planner.plan(body.goal)
         except ValueError as exc:
@@ -257,16 +264,12 @@ def create_app() -> FastAPI:
         llm: Annotated[LLMClient, Depends(get_llm_client)],
         engine: Annotated[ExecutionEngine, Depends(get_execution_engine)],
     ) -> ExecutionResult:
-        """Plan the goal and execute it end-to-end."""
         if body.strategy == "llm":
             planner: Planner = LLMPlanner(llm=llm)
         elif body.strategy == "rule_based":
             planner = RuleBasedPlanner()
         else:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unknown strategy: {body.strategy}",
-            )
+            raise HTTPException(status_code=400, detail=f"Unknown strategy: {body.strategy}")
         try:
             plan = planner.plan(body.goal)
         except ValueError as exc:
@@ -274,8 +277,18 @@ def create_app() -> FastAPI:
         engine.abort_on_failure = body.abort_on_failure
         return engine.run(plan)
 
+    @app.post("/fix/propose", response_model=FixProposal, tags=["agent"])
+    def fix_propose_endpoint(
+        body: FixProposeRequest,
+        generator: Annotated[FixGenerator, Depends(get_fix_generator)],
+    ) -> FixProposal:
+        """Ask the LLM to propose a fix as a unified diff."""
+        try:
+            return generator.propose(body.goal, body.context)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     return app
 
 
-# Module-level instance for `uvicorn backend.main:app`.
 app: FastAPI = create_app()

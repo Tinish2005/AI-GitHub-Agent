@@ -24,6 +24,8 @@ from backend.agent.models import Plan
 from backend.agent.planner import Planner
 from backend.agent.engine import ExecutionEngine, ExecutionResult
 from backend.agent.models import Plan
+from backend.agent.fix_generator import FixGenerator
+from backend.agent.fix_models import FixProposal
 
 
 
@@ -183,7 +185,6 @@ def make_ask_codebase_tool(pipeline: RAGPipeline) -> Tool:
     )
 
     
-
 def build_default_registry(
     store: VectorStore,
     pipeline: RAGPipeline,
@@ -191,6 +192,7 @@ def build_default_registry(
     indexer: IndexingService | None = None,
     planner: Planner | None = None,
     engine: ExecutionEngine | None = None,
+    generator: FixGenerator | None = None,
 ) -> ToolRegistry:
     """Build a registry pre-populated with the standard agent toolset."""
     reg = ToolRegistry()
@@ -207,6 +209,8 @@ def build_default_registry(
         reg.register(make_create_plan_tool(planner))
     if planner is not None and engine is not None:
         reg.register(make_execute_plan_tool(planner, engine))
+    if generator is not None:
+        reg.register(make_propose_fix_tool(generator))
     return reg
 
 def make_github_get_file_tool(github: GitHubAPI) -> Tool:
@@ -429,6 +433,46 @@ def make_execute_plan_tool(planner: Planner, engine: ExecutionEngine) -> Tool:
             "type": "object",
             "properties": {
                 "goal": {"type": "string", "description": "The user's goal in plain English."},
+            },
+            "required": ["goal"],
+        },
+        execute=execute,
+    )
+
+    
+
+def make_propose_fix_tool(generator: FixGenerator) -> Tool:
+    """Tool: ask the LLM to produce a unified-diff fix for a goal + context."""
+
+    def execute(params: dict) -> str:
+        goal = str(params.get("goal", "")).strip()
+        context = str(params.get("context", "")).strip()
+        if not goal:
+            raise ValueError("Param 'goal' is required and must be non-empty.")
+        proposal: FixProposal = generator.propose(goal, context)
+        head = (
+            f"Goal: {proposal.goal}\n"
+            f"Model: {proposal.model}\n"
+            f"Confidence: {proposal.confidence:.2f}\n"
+            f"Files changed: {proposal.files_changed} "
+            f"(+{proposal.total_added} / -{proposal.total_removed})\n"
+            f"Valid diff: {proposal.is_valid}"
+        )
+        if not proposal.is_valid:
+            head += f"\nValidation error: {proposal.validation_error}"
+        return f"{head}\n\nExplanation:\n{proposal.explanation}\n\nDiff:\n{proposal.diff}"
+
+    return Tool(
+        name="propose_fix",
+        description="Propose a code fix as a unified diff for the given goal and context.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "goal": {"type": "string", "description": "The user's goal / bug description."},
+                "context": {
+                    "type": "string",
+                    "description": "Optional retrieved code context to guide the fix.",
+                },
             },
             "required": ["goal"],
         },

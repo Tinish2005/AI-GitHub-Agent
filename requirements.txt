@@ -16,6 +16,9 @@ openai>=1.55.0
 # --- Git cloning (Loop 8) ---
 GitPython>=3.1.40
 
+# --- Diff parsing (Loop 11) ---
+unidiff>=0.7.5
+
 # --- Testing ---
 pytest>=8.3.4
 httpx>=0.28.1
