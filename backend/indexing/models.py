@@ -50,7 +50,7 @@ class CodeChunk(BaseModel):
     )
     language: Literal["python"] = Field(
         default="python",
-        description="Source language. Pinned to Python for Loop 2.",
+        description="Source language. Pinned to Python.",
     )
 
     @field_validator("end_line")

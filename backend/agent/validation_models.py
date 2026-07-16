@@ -3,7 +3,7 @@ Typed models for the validation pipeline.
 
 A ValidationResult is what a validated FixProposal gets back:
 per-check pass/fail, a top-level score, and a decision on whether
-the fix is safe to hand to Loop 13 (draft PR).
+the fix is safe to hand to the draft-PR stage.
 """
 
 from __future__ import annotations

@@ -93,4 +93,5 @@ def test_pr_endpoint_reports_skip_when_validation_fails(tmp_path: Path) -> None:
         body = resp.json()
         assert body["created"] is False
     finally:
-        app.dependency_overrides.clear()
+        app.dependency_overrides.clear()  
+        

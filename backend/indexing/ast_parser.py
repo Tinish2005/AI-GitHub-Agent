@@ -125,7 +125,7 @@ def parse_file(file_path: Path) -> list[CodeChunk]:
     if not file_path.is_file():
         raise FileNotFoundError(f"Source file not found: {file_path}")
     if file_path.suffix != ".py":
-        raise ValueError(f"Only .py files are supported in Loop 2: {file_path}")
+        raise ValueError(f"Only .py files are supported: {file_path}")
 
     source = file_path.read_text(encoding="utf-8")
     return parse_source(source, file_path)

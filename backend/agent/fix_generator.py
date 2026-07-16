@@ -12,7 +12,7 @@ Design notes:
       via `FixProposal.is_valid=False` and a filled `validation_error`.
     - `unidiff` gives us per-file stats for free.
     - We NEVER apply the diff here. Applying and testing belongs to
-      Loop 12. This module is purely "propose and describe".
+      a later stage. This module is purely "propose and describe".
 """
 
 from __future__ import annotations

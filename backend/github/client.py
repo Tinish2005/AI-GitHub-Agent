@@ -92,7 +92,7 @@ class GitHubClient:
     Real GitHub REST API client.
 
     Uses a short-lived `httpx.Client` per call (cheap; the alternative is
-    keeping a long-lived connection pool which is overkill for Loop 7).
+    keeping a long-lived connection pool which is overkill here).
     Authentication is optional: when no token is given the client falls
     back to unauthenticated requests (60 req/hour rate limit).
     """

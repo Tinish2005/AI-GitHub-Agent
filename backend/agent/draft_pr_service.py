@@ -19,7 +19,7 @@ Design notes:
     - Commit + PR are always DRAFT. Merging is a human decision.
     - GitHub commit-content creation requires a full file body, not a
       unified diff. Because our diff parsing is limited to
-      new-file additions (Loop 12 sandbox), this service currently
+      new-file additions (sandbox), this service currently
       supports the same shape: it reads the '+' lines out of the diff
       to build the new file body. If the diff is anything more complex,
       we skip with a clear reason.

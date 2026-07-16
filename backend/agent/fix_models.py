@@ -2,7 +2,7 @@
 Typed models for the fix-generation layer.
 
 A FixProposal is what the LLM produces + what our validator accepts.
-Loop 12 will run validation against it; Loop 13 will convert it into
+A later stage will run validation against it; A later stage will convert it into
 a draft PR.
 """
 

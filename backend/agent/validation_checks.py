@@ -1,14 +1,14 @@
 """
 Concrete ValidationCheck implementations.
 
-Loop 12 ships:
+Ships:
     - SyntaxCheck: every changed .py file must parse with the ast module
     - ImportCheck: every top-level import in changed files must resolve
       against the sandbox directory (stdlib + files inside the sandbox)
     - NoOpCheck: an intentionally-skipped placeholder used to represent
       "not yet implemented" stages (e.g. real lint / real security).
 
-Loop 12 stays honest: we run the checks we can trust today. The
+It stays honest: we run the checks we can trust today. The
 pipeline can be extended with more concrete checks later without any
 change to the outer contract.
 """
@@ -87,7 +87,7 @@ class ImportCheck:
 
     We deliberately do NOT execute the code - just parse and check
     that names could plausibly be imported. Runtime import errors
-    belong to Loop 13's actual test execution (future work).
+    belong to a later stage's actual test execution (future work).
     """
 
     name: str = "imports"
@@ -180,7 +180,7 @@ def default_checks() -> tuple:
     return (
         SyntaxCheck(),
         ImportCheck(),
-        NoOpCheck("lint", "Loop 12+ future: wire ruff / flake8 subprocess."),
-        NoOpCheck("tests", "Loop 12+ future: run pytest in a subprocess."),
-        NoOpCheck("security", "Loop 12+ future: wire bandit / secret-scan."),
+        NoOpCheck("lint", "Future: wire ruff / flake8 subprocess."),
+        NoOpCheck("tests", "Future: run pytest in a subprocess."),
+        NoOpCheck("security", "Future: wire bandit / secret-scan."),
     )

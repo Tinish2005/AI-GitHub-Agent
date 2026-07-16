@@ -1,7 +1,7 @@
 """
 Execution engine.
 
-Takes a Plan (from Loop 9) and runs each step in order. For each step:
+Takes a Plan and runs each step in order. For each step:
     - Picks the matching StepExecutor by kind
     - Calls executor.run(context) with the accumulated prior outputs
     - Captures the result, marks the step COMPLETED
@@ -9,7 +9,7 @@ Takes a Plan (from Loop 9) and runs each step in order. For each step:
       either continues or aborts depending on the abort_on_failure flag
 
 Returns a typed ExecutionResult with per-step results and a top-level
-status. Loop 12+ can add replanning; today we ship the "run + report"
+status. Future work can add replanning; today we ship the "run + report"
 core.
 """
 

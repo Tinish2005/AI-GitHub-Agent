@@ -1,1 +1,1 @@
-"""Agent package - planner + (Loop 10) execution engine."""
+"""Agent package - planner + execution engine."""

@@ -2,7 +2,7 @@
 Planners.
 
 A Planner turns a user goal into a Plan. Two implementations ship in
-Loop 9:
+
 
     - RuleBasedPlanner: deterministic, no LLM. Picks a plan template
       based on keywords in the goal. Fast, cheap, testable.

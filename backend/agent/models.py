@@ -3,7 +3,7 @@ Data models for the agent planning layer.
 
 A `Plan` is an ordered list of `PlanStep`s. Each step declares a `kind`
 (what category of work it is) and a plain-English `description`. Steps
-are pure data - the execution engine (Loop 10) will actually run them.
+are pure data - the execution engine will actually run them.
 """
 
 from __future__ import annotations
