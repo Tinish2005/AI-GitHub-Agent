@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Env / secrets
+.env
+
+# Project data
+vector_db/
+.repo_cache/
+
+# Editors
+.vscode/
+.idea/
+
+# Tests
+.pytest_cache/
+.coverage

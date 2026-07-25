@@ -1,0 +1,1 @@
+"""Indexing package — offline pipeline for parsing and chunking source code."""

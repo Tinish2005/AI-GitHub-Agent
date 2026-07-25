@@ -1,0 +1,1 @@
+"""GitHub package - read-only client for repos, files, issues, and PRs."""
