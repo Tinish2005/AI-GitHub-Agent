@@ -78,7 +78,7 @@ Then open http://localhost:5173 in your browser.
 | POST | /index/github | Index a GitHub repo via the API |
 | POST | /mcp | MCP JSON-RPC endpoint |
 
-Interactive API docs are auto-generated at http://localhost:8000/docs.
+Interactive API docs are auto-generated at https://ai-github-agent-2q87.onrender.com.
 
 ---
 

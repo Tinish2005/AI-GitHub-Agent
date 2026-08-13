@@ -6,7 +6,6 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field, ValidationError
-
 from backend.config import Settings, get_settings
 from backend.indexing.embeddings import EmbeddingService
 from backend.indexing.vector_store import VectorStore
@@ -200,6 +199,7 @@ def _retrieve_repo_context(vector_store, goal, top_k=5):
         blocks.append(f"[{i}] {qname} ({fpath})\n{r.document}")
     return "\n\n".join(blocks)
 
+from fastapi.middleware.cors import CORSMiddleware
 
 def create_app() -> FastAPI:
     settings = get_settings()
@@ -210,6 +210,16 @@ def create_app() -> FastAPI:
         version=settings.app_version,
         debug=settings.debug,
     )
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # all your existing routes remain unchanged below
 
     @app.get("/", response_model=HealthResponse, tags=["meta"])
     def root(settings: Annotated[Settings, Depends(get_settings)]) -> HealthResponse:
