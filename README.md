@@ -5,6 +5,20 @@ An AI agent that understands GitHub repositories. Paste a repo URL and it indexe
 Built with a **Planner – Executor – Validator** architecture, retrieval-augmented generation (RAG), and the Model Context Protocol (MCP).
 
 ---
+## 🌐 Live Demo
+
+#*# Frontend
+
+https://ai-git-hub-age*t.vercel.app/
+
+### Backend API
+
+ht*ps://ai-github-agent-2q87.onrender*com
+
+### API Docs
+
+https://ai-gith*b-agent-2q87.onrender.com/docs
+```*
 
 ## Features
 
