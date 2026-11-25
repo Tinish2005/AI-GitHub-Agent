@@ -8,7 +8,21 @@ a draft PR.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, field_validator
+import hashlib
+
+from pydantic import BaseModel, Field, computed_field, field_validator
+
+
+MAX_DIFF_CHARS = 200_000
+
+
+def diff_fingerprint(diff: str) -> str:
+    """SHA-256 of the exact diff text. The same diff always has the same fingerprint."""
+    return hashlib.sha256(diff.encode("utf-8")).hexdigest()
+
+
+class ReviewedDiffError(ValueError):
+    """The reviewed diff cannot be used as sent. The message is safe to show."""
 
 
 class FixHunk(BaseModel):
@@ -47,6 +61,11 @@ class FixProposal(BaseModel):
             return 1.0
         return v
 
+    @computed_field(description="SHA-256 of the diff text. Every stage shows the same value for the same diff.")  # type: ignore[prop-decorator]
+    @property
+    def diff_sha256(self) -> str:
+        return diff_fingerprint(self.diff)
+
     @property
     def files_changed(self) -> int:
         return len(self.hunks)
@@ -58,3 +77,20 @@ class FixProposal(BaseModel):
     @property
     def total_removed(self) -> int:
         return sum(h.removed_lines for h in self.hunks)
+
+
+class ReviewedProposal(BaseModel):
+    """A proposal the user has already reviewed, sent back by the client.
+
+    The server uses this diff as is. It never asks the AI for a new one.
+    """
+
+    goal: str = Field(min_length=1)
+    explanation: str = Field(min_length=1)
+    diff: str = Field(min_length=1, max_length=MAX_DIFF_CHARS)
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    model: str = Field(default="reviewed", min_length=1)
+    diff_sha256: str | None = Field(
+        default=None,
+        description="Optional: the fingerprint shown when the diff was reviewed. A mismatch is refused.",
+    )

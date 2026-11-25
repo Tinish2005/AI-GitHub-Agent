@@ -7,11 +7,13 @@ from typing import Iterator
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
 from backend.cloning.cloner import FakeCloner
 from backend.cloning.indexing_service import IndexingService
 from backend.indexing.embeddings import EMBEDDING_DIMENSION, EmbeddingService
 from backend.indexing.vector_store import VectorStore
+from backend.config import Settings, get_settings
 from backend.main import app, get_indexing_service
 
 
@@ -38,8 +40,12 @@ def client(tmp_path: Path):
     cloner = FakeCloner(cache_dir=tmp_path / "cache")
     indexer = IndexingService(cloner=cloner, vector_store=store)
 
+    # Indexing is closed unless the admin key is configured and sent.
     app.dependency_overrides[get_indexing_service] = lambda: indexer
-    yield TestClient(app)
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        _env_file=None, admin_api_key=SecretStr("test-admin-key"),
+    )
+    yield TestClient(app, headers={"X-Admin-Key": "test-admin-key"})
     app.dependency_overrides.clear()
 
 

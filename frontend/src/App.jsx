@@ -1,35 +1,50 @@
-import { NavLink, Routes, Route } from "react-router-dom";
-import Home from "./pages/Home.jsx";
-import Ask from "./pages/Ask.jsx";
-import Plan from "./pages/Plan.jsx";
-import Fix from "./pages/Fix.jsx";
-import Execute from "./pages/Execute.jsx";
-import IndexRepo from "./pages/IndexRepo.jsx";
+import React from 'react';
+import { Routes, Route } from 'react-router-dom';
+import './styles/agent.css';
+import { AppStoreProvider } from './store/appStore';
+import Sidebar from './components/Sidebar';
+import Topbar from './components/Topbar';
+import ServerGate from './components/ServerGate';
+import Home from './pages/Home';
+import Ask from './pages/Ask';
+import Plan from './pages/Plan';
+import Fix from './pages/Fix';
+import Execute from './pages/Execute';
+import IndexRepo from './pages/IndexRepo';
+import CodeMemory from './pages/CodeMemory';
+import Activity from './pages/Activity';
 
 export default function App() {
   return (
-    <div className="layout">
-      <aside className="sidebar">
-        <div className="brand">AI <span>GitHub Agent</span></div>
-        <nav className="nav">
-          <NavLink to="/" end>Home</NavLink>
-          <NavLink to="/index-repo">Index a Repo</NavLink>
-          <NavLink to="/ask">Ask the Codebase</NavLink>
-          <NavLink to="/plan">Plan</NavLink>
-          <NavLink to="/fix">Propose Fix</NavLink>
-          <NavLink to="/execute">Execute</NavLink>
-        </nav>
-      </aside>
-      <main className="content">
-        <Routes>
-          <Route path="/" element={<Home />} />
-          <Route path="/index-repo" element={<IndexRepo />} />
-          <Route path="/ask" element={<Ask />} />
-          <Route path="/plan" element={<Plan />} />
-          <Route path="/fix" element={<Fix />} />
-          <Route path="/execute" element={<Execute />} />
-        </Routes>
-      </main>
-    </div>
+    <AppStoreProvider>
+      <div className="app">
+        <Sidebar />
+        <div className="main">
+          <Topbar />
+          <div className="content">
+            <ServerGate>
+            <Routes>
+              {/* Dashboard */}
+              <Route path="/" element={<Home />} />
+
+              {/* Workspace Dedicated Pages */}
+              <Route path="/index-repo" element={<IndexRepo />} />
+              <Route path="/repositories" element={<IndexRepo />} />
+              <Route path="/ask" element={<Ask />} />
+
+              {/* Workflow Dedicated Pages */}
+              <Route path="/plan" element={<Plan />} />
+              <Route path="/fix" element={<Fix />} />
+              <Route path="/execute" element={<Execute />} />
+
+              {/* Insights */}
+              <Route path="/code-memory" element={<CodeMemory />} />
+              <Route path="/activity" element={<Activity />} />
+            </Routes>
+            </ServerGate>
+          </div>
+        </div>
+      </div>
+    </AppStoreProvider>
   );
 }

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from backend.agent.executor import StepContext, ValidateExecutor
+import pytest
+
+from backend.agent.executor import StepContext, StepSkipped, ValidateExecutor
 from backend.agent.fix_models import FixHunk, FixProposal
 from backend.agent.models import PlanStep, StepKind
 from backend.agent.validation_checks import SyntaxCheck
@@ -54,5 +56,5 @@ def test_validate_executor_missing_proposal(tmp_path: Path) -> None:
     pipeline = ValidationPipeline(checks=(SyntaxCheck(),), sandbox_parent=tmp_path)
     ex = ValidateExecutor(pipeline)
     ctx = StepContext(goal="x", step=_step(), prior_outputs={})
-    out = ex.run(ctx)
-    assert "no FixProposal" in out
+    with pytest.raises(StepSkipped, match="nothing to validate"):
+        ex.run(ctx)

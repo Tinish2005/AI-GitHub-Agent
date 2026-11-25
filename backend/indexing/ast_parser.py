@@ -3,6 +3,8 @@ AST-based parser for Python source files.
 
 Walks a Python file's abstract syntax tree and produces a list of `CodeChunk`s
 — one per top-level function, top-level class, and per method inside any class.
+Functions marked @overload are type-hint stubs and are skipped when the real
+function is defined too (the class chunk still contains them).
 """
 
 from __future__ import annotations
@@ -15,6 +17,27 @@ from backend.indexing.models import ChunkType, CodeChunk
 
 # Type alias for "anything we treat as a function-like node".
 FuncNode = ast.FunctionDef | ast.AsyncFunctionDef
+
+
+def _is_overload(node: FuncNode) -> bool:
+    """True for a function marked @overload (also typing.overload, t.overload, ...)."""
+    for decorator in node.decorator_list:
+        if isinstance(decorator, ast.Name) and decorator.id == "overload":
+            return True
+        if isinstance(decorator, ast.Attribute) and decorator.attr == "overload":
+            return True
+    return False
+
+
+def _skip_stubs(nodes: Iterable[FuncNode]) -> list[FuncNode]:
+    """Drop @overload type-hint stubs, but only when the real function is also defined.
+
+    The stubs hold no logic, and they would otherwise fill the search results
+    with near-identical one-line chunks. A name that has only stubs keeps them.
+    """
+    nodes = list(nodes)
+    implemented = {n.name for n in nodes if not _is_overload(n)}
+    return [n for n in nodes if not (_is_overload(n) and n.name in implemented)]
 
 
 def _function_chunk_type(node: FuncNode, *, is_method: bool) -> ChunkType:
@@ -77,8 +100,14 @@ def parse_source(source: str, file_path: Path) -> list[CodeChunk]:
 
     chunks: list[CodeChunk] = []
 
+    top_level_functions = _skip_stubs(
+        n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    )
+
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node not in top_level_functions:
+                continue
             chunk = _build_chunk(
                 node,
                 source=source,
@@ -104,7 +133,7 @@ def parse_source(source: str, file_path: Path) -> list[CodeChunk]:
             if class_chunk is not None:
                 chunks.append(class_chunk)
 
-            for method in _iter_methods(node):
+            for method in _skip_stubs(_iter_methods(node)):
                 method_chunk = _build_chunk(
                     method,
                     source=source,

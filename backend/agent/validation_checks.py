@@ -114,6 +114,11 @@ class ImportCheck:
                 continue
 
             for node in tree.body:
+                if isinstance(node, ast.ImportFrom) and node.level > 0:
+                    # Relative import (from .x import y): look next to the file.
+                    if node.module and not self._relative_resolvable(node, full):
+                        missing.append(f"{rel}: {'.' * node.level}{node.module}")
+                    continue
                 names = self._imported_names(node)
                 for name in names:
                     if not self._resolvable(name, sandbox_root):
@@ -141,6 +146,14 @@ class ImportCheck:
         return []
 
     @staticmethod
+    def _relative_resolvable(node: ast.ImportFrom, file_path: Path) -> bool:
+        base = file_path.parent
+        for _ in range(node.level - 1):
+            base = base.parent
+        first = node.module.split(".")[0]
+        return (base / f"{first}.py").is_file() or (base / first).is_dir()
+
+    @staticmethod
     def _resolvable(top_level_name: str, sandbox_root: Path) -> bool:
         # 1. Try stdlib / installed packages.
         try:
@@ -156,6 +169,10 @@ class ImportCheck:
             return True
         # 3. Also allow top-level dotted package name (e.g. "backend").
         if (sandbox_root / top_level_name).is_dir():
+            return True
+        # 4. Repos with a src/ layout keep their package under src/.
+        src = sandbox_root / "src"
+        if (src / f"{top_level_name}.py").is_file() or (src / top_level_name).is_dir():
             return True
         return False
 

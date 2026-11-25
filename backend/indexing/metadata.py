@@ -56,12 +56,17 @@ def extract_metadata_for_chunks(
     chunks: list[CodeChunk],
     *,
     project_root: Path | None = None,
+    file_sources: dict[Path, str] | None = None,
 ) -> list[ChunkMetadata]:
     """
     Build metadata for a batch of chunks, caching file-level imports.
 
     Two chunks from the same file share the same `imports` tuple, so we
     parse each file's imports exactly once.
+
+    `file_sources` maps a file path to its full text. Use it when the files
+    are not on disk (for example, files fetched from the GitHub API): the
+    imports are then read from that text instead of from a file on disk.
     """
     imports_cache: dict[Path, tuple[str, ...]] = {}
     result: list[ChunkMetadata] = []
@@ -69,7 +74,12 @@ def extract_metadata_for_chunks(
     for chunk in chunks:
         file_imports = imports_cache.get(chunk.file_path)
         if file_imports is None:
-            file_imports = _extract_file_imports(chunk.file_path)
+            if file_sources is not None and chunk.file_path in file_sources:
+                file_imports = _imports_from_text(
+                    file_sources[chunk.file_path], str(chunk.file_path)
+                )
+            else:
+                file_imports = _extract_file_imports(chunk.file_path)
             imports_cache[chunk.file_path] = file_imports
 
         result.append(
@@ -131,8 +141,17 @@ def _extract_file_imports(file_path: Path) -> tuple[str, ...]:
         return ()
 
     try:
-        tree = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
-    except (SyntaxError, UnicodeDecodeError):
+        text = file_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        return ()
+    return _imports_from_text(text, str(file_path))
+
+
+def _imports_from_text(text: str, filename: str) -> tuple[str, ...]:
+    """Return the deduped, sorted imports found in Python source text."""
+    try:
+        tree = ast.parse(text, filename=filename)
+    except (SyntaxError, ValueError):
         return ()
 
     names: set[str] = set()

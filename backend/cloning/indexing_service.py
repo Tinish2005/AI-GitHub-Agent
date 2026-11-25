@@ -14,13 +14,22 @@ network is needed.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from backend.cloning.cloner import Cloner, CloneResult
 from backend.indexing.ast_parser import parse_directory
 from backend.indexing.metadata import extract_metadata_for_chunks
 from backend.indexing.vector_store import VectorStore
+
+
+def repo_label_from_url(url: str) -> str:
+    """Turn a clone URL into "owner/name" (best effort), e.g. for the stats page."""
+    text = re.sub(r"\.git$", "", (url or "").strip().rstrip("/"))
+    parts = [p for p in re.split(r"[/:]", text) if p]
+    return "/".join(parts[-2:]) if len(parts) >= 2 else text
 
 
 @dataclass(frozen=True)
@@ -65,7 +74,16 @@ class IndexingService:
             )
 
         metas = extract_metadata_for_chunks(chunks, project_root=clone.local_path)
-        self.vector_store.add_chunks(chunks, metas)
+        self.vector_store.add_chunks(
+            chunks,
+            metas,
+            extra_metadata={
+                "repo": repo_label_from_url(clone.url),
+                "indexed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                # Lets the stats page show paths relative to the clone folder.
+                "root": str(clone.local_path),
+            },
+        )
 
         return IndexResult(
             url=clone.url,

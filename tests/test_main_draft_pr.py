@@ -12,6 +12,7 @@ from backend.agent.draft_pr_service import FakeDraftPRService
 from backend.agent.fix_generator import FixGenerator
 from backend.agent.validation_checks import SyntaxCheck
 from backend.agent.validation_pipeline import ValidationPipeline
+from backend.config import Settings, get_settings
 from backend.main import (
     app, get_draft_pr_service, get_fix_generator, get_validation_pipeline,
 )
@@ -51,6 +52,8 @@ def client(tmp_path: Path):
     app.dependency_overrides[get_fix_generator] = lambda: gen
     app.dependency_overrides[get_validation_pipeline] = lambda: validator
     app.dependency_overrides[get_draft_pr_service] = lambda: svc
+    # These tests send only a goal, so they use the escape hatch on purpose.
+    app.dependency_overrides[get_settings] = lambda: Settings(_env_file=None, allow_regenerated_pr=True)
     yield TestClient(app)
     app.dependency_overrides.clear()
 
@@ -83,6 +86,8 @@ def test_pr_endpoint_reports_skip_when_validation_fails(tmp_path: Path) -> None:
     app.dependency_overrides[get_fix_generator] = lambda: gen
     app.dependency_overrides[get_validation_pipeline] = lambda: validator
     app.dependency_overrides[get_draft_pr_service] = lambda: svc
+    # These tests send only a goal, so they use the escape hatch on purpose.
+    app.dependency_overrides[get_settings] = lambda: Settings(_env_file=None, allow_regenerated_pr=True)
     try:
         client = TestClient(app)
         resp = client.post("/fix/pr", json={

@@ -1,4 +1,4 @@
-﻿"""
+"""
 GitHub repository indexer using the REST API (no Git required).
 
 Fetches a repo''s Python files over HTTPS via the GitHub API, parses
@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import ssl
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -24,6 +25,11 @@ from backend.indexing.vector_store import VectorStore
 
 GITHUB_API_BASE = "https://api.github.com"
 EXCLUDED_PARTS = {".venv", "venv", "__pycache__", ".git", "node_modules", "tests", "test"}
+
+
+def _utc_now() -> str:
+    """Current UTC time as an ISO 8601 string (seconds precision)."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _make_ssl_context():
@@ -43,6 +49,8 @@ class GitHubIndexResult:
     ref: str
     files_indexed: int
     chunks_indexed: int
+    files_skipped: int = 0
+    truncated: bool = False
 
 
 class GitHubRepoIndexer:
@@ -105,24 +113,77 @@ class GitHubRepoIndexer:
             return base64.b64decode(raw).decode("utf-8", errors="replace")
         return raw
 
-    def index(self, coord, ref=None):
+    def index(
+        self,
+        coord,
+        ref=None,
+        *,
+        include_prefixes=None,
+        tags=None,
+        max_chunks=None,
+        max_file_bytes=None,
+        progress=None,
+        before_add=None,
+    ):
+        """Index a repo.
+
+        `include_prefixes` (e.g. ("src/",)) keeps only files under those paths.
+        `tags` are extra labels saved with every chunk; they win over the defaults.
+        `max_chunks` stops adding files once the chunk budget would be exceeded, and
+        `max_file_bytes` skips bigger files; both are reported in the result.
+        `progress(phase, done, total)` is called while files are fetched and once
+        before embedding starts. `before_add(chunk_count)` is called just before the
+        (slow, paid) embedding step and may raise to stop the run.
+        """
         owner, repo = coord.owner, coord.repo
         branch = ref or self._default_branch(owner, repo)
 
         files = self._list_python_files(owner, repo, branch)
+        if include_prefixes:
+            prefixes = tuple(p.replace("\\", "/") for p in include_prefixes)
+            files = [f for f in files if f.replace("\\", "/").startswith(prefixes)]
         files = files[: self.max_files]
 
+        report = progress or (lambda phase, done, total: None)
+        report("fetching", 0, len(files))
         all_chunks = []
-        for path in files:
+        sources: dict = {}
+        skipped = 0
+        truncated = False
+        for position, path in enumerate(files, start=1):
             try:
                 content = self._fetch_file(owner, repo, path, branch)
             except Exception:
+                skipped += 1
                 continue
-            all_chunks.extend(parse_source(content, Path(path)))
+            if max_file_bytes is not None and len(content.encode("utf-8")) > max_file_bytes:
+                skipped += 1
+                continue
+            file_chunks = parse_source(content, Path(path))
+            if max_chunks is not None and len(all_chunks) + len(file_chunks) > max_chunks:
+                truncated = True
+                skipped += len(files) - position + 1
+                break
+            sources[Path(path)] = content
+            all_chunks.extend(file_chunks)
+            report("fetching", position, len(files))
 
         if not all_chunks:
-            return GitHubIndexResult(owner, repo, branch, len(files), 0)
+            return GitHubIndexResult(owner, repo, branch, len(files) - skipped, 0, skipped, truncated)
 
-        metas = extract_metadata_for_chunks(all_chunks)
-        self.vector_store.add_chunks(all_chunks, metas)
-        return GitHubIndexResult(owner, repo, branch, len(files), len(all_chunks))
+        report("embedding", 0, len(all_chunks))
+        if before_add is not None:
+            before_add(len(all_chunks))
+
+        # Files are not on disk, so read their imports from the fetched text.
+        metas = extract_metadata_for_chunks(all_chunks, file_sources=sources)
+        labels = {
+            "repo": f"{owner}/{repo}",
+            "ref": branch,
+            "indexed_at": _utc_now(),
+        }
+        labels.update({str(k): str(v) for k, v in (tags or {}).items()})
+        self.vector_store.add_chunks(all_chunks, metas, extra_metadata=labels)
+        return GitHubIndexResult(
+            owner, repo, branch, len(files) - skipped, len(all_chunks), skipped, truncated,
+        )

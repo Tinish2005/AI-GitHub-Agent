@@ -18,11 +18,14 @@ Design notes:
       collide.
     - Commit + PR are always DRAFT. Merging is a human decision.
     - GitHub commit-content creation requires a full file body, not a
-      unified diff. Because our diff parsing is limited to
-      new-file additions (sandbox), this service currently
-      supports the same shape: it reads the '+' lines out of the diff
-      to build the new file body. If the diff is anything more complex,
-      we skip with a clear reason.
+      unified diff. The real service therefore reads each file the diff
+      changes from the base commit, applies the reviewed diff to it with
+      the same strict rules as the validation step, and commits the
+      resulting text. It supports new files, changes to existing files and
+      deletions. All new content is computed BEFORE any branch is created,
+      so a patch that does not fit leaves nothing behind on GitHub.
+    - Never touched: renames, binary files, workflow files under
+      .github/workflows/, files over 1 MB, and diffs over 20 files.
 """
 
 from __future__ import annotations
@@ -30,11 +33,17 @@ from __future__ import annotations
 import base64
 import re
 import time
+from dataclasses import dataclass
 from typing import Protocol
+from urllib.parse import quote
 
 import httpx
 
 from backend.agent.draft_pr_models import DraftPRRequest, DraftPRResult
+from backend.agent.patching import apply_patch_to_text
+from backend.agent.validation_pipeline import PatchApplyError, ValidationPipeline
+from backend.github.repo_indexer import _make_ssl_context
+from backend.github.repo_snapshot import MAX_FILE_BYTES, MAX_FILES, SnapshotError, safe_repo_path
 
 
 GITHUB_API_BASE: str = "https://api.github.com"
@@ -105,6 +114,137 @@ class FakeDraftPRService:
 # ---------------------------------------------------------------------------
 
 
+class GitHubHTTPError(RuntimeError):
+    """GitHub answered with an error status."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+class PRChangeError(Exception):
+    """The diff cannot be turned into commits. The message is safe to show."""
+
+
+@dataclass(frozen=True)
+class ChangeOp:
+    """One file the diff touches."""
+
+    kind: str  # "add", "modify" or "delete"
+    path: str
+    patched_file: object
+
+
+@dataclass(frozen=True)
+class PreparedChange:
+    """A file change ready to commit: the new content and the blob it replaces."""
+
+    kind: str
+    path: str
+    content: str | None
+    blob_sha: str | None
+
+
+def _parse_changes(diff_text: str) -> list:
+    """Split a diff into safe per-file operations, or raise PRChangeError."""
+    try:
+        from unidiff import PatchSet
+    except ImportError as exc:  # pragma: no cover - unidiff is a requirement
+        raise PRChangeError("unidiff is not installed on the server.") from exc
+    duplicate = _first_duplicate_path(diff_text)
+    if duplicate:
+        # Checked on the raw text: old unidiff versions silently merge the same file twice.
+        raise PRChangeError(f"{duplicate} appears twice in the diff.")
+    try:
+        patch = PatchSet(diff_text)
+    except Exception as exc:
+        raise PRChangeError(
+            f"The diff could not be read ({type(exc).__name__}).{_old_parser_hint()}"
+        ) from exc
+    if len(patch) == 0:
+        raise PRChangeError("The diff contains no file changes.")
+    if len(patch) > MAX_FILES:
+        raise PRChangeError(f"The diff changes {len(patch)} files; the limit is {MAX_FILES}.")
+
+    operations: list = []
+    seen: set = set()
+    for patched_file in patch:
+        if getattr(patched_file, "is_binary_file", False):
+            raise PRChangeError("Binary file changes are not supported.")
+        source = str(patched_file.source_file or "")
+        target = str(patched_file.target_file or "")
+        if (
+            source != "/dev/null" and target != "/dev/null"
+            and ValidationPipeline._normalized_path(patched_file) != _strip_prefix(source)
+        ):
+            raise PRChangeError("File renames are not supported.")
+        try:
+            path = safe_repo_path(ValidationPipeline._normalized_path(patched_file))
+        except SnapshotError as exc:
+            raise PRChangeError(str(exc)) from exc
+        if path.startswith(".github/workflows/"):
+            raise PRChangeError(f"{path} is a workflow file. The agent never changes workflow files.")
+        if path in seen:
+            raise PRChangeError(f"{path} appears twice in the diff.")
+        seen.add(path)
+        if patched_file.is_added_file:
+            kind = "add"
+        elif patched_file.is_removed_file:
+            kind = "delete"
+        else:
+            kind = "modify"
+        operations.append(ChangeOp(kind, path, patched_file))
+    return operations
+
+
+def _header_path(text: str) -> str:
+    """The file name in a '--- ' or '+++ ' header line (no a/ b/ prefix, no timestamp)."""
+    return _strip_prefix(text.split("\t")[0].strip())
+
+
+def _first_duplicate_path(diff_text: str) -> str | None:
+    """The first file that has two sections in the diff, or None."""
+    lines = diff_text.splitlines()
+    seen: set = set()
+    for i in range(len(lines) - 2):
+        # A real file header pair is followed by a hunk header; a changed line that
+        # merely looks like one is followed by more diff content.
+        if lines[i].startswith("--- ") and lines[i + 1].startswith("+++ ") and lines[i + 2].startswith("@@"):
+            source, target = _header_path(lines[i][4:]), _header_path(lines[i + 1][4:])
+            path = target if target != "/dev/null" else source
+            if path in seen:
+                return path
+            seen.add(path)
+    return None
+
+
+def _old_parser_hint() -> str:
+    """A hint when the diff reader (unidiff) is too old to read some diffs."""
+    try:
+        from importlib.metadata import version
+
+        installed = version("unidiff")
+        if int(installed.split(".")[0]) < 1:
+            return f" The server's unidiff library is old ({installed}); install unidiff>=1.0.0."
+    except Exception:
+        pass
+    return ""
+
+
+def _strip_prefix(path: str) -> str:
+    for prefix in ("a/", "b/"):
+        if path.startswith(prefix):
+            return path[len(prefix):]
+    return path
+
+
+def _apply(op: ChangeOp, text: str) -> str:
+    try:
+        return apply_patch_to_text(text, op.patched_file, op.path)
+    except PatchApplyError as exc:
+        raise PRChangeError(f"The diff does not fit the repository: {exc}") from exc
+
+
 class GitHubDraftPRService:
     """
     Real GitHub-backed draft PR creator.
@@ -120,12 +260,14 @@ class GitHubDraftPRService:
         *,
         base_url: str = GITHUB_API_BASE,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        transport=None,
     ) -> None:
         if not token:
             raise ValueError("GitHub token must not be empty.")
         self._token = token
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
+        self._transport = transport
 
     def _headers(self) -> dict:
         return {
@@ -149,36 +291,53 @@ class GitHubDraftPRService:
                 error="Proposal diff is empty; nothing to publish.",
             )
 
-        file_ops = _extract_new_files_from_diff(request.proposal_diff)
-        if not file_ops:
-            return DraftPRResult(
-                created=False,
-                error=(
-                    "Draft-PR publishing currently supports 'new file' diffs only. "
-                    "Extend GitHubDraftPRService to handle modifications and deletions."
-                ),
-            )
-
         branch = _build_branch(request.goal)
         title = _build_title(request.goal)
         body = _build_body(request)
 
+        # 1. Work out every new file content BEFORE anything is created on GitHub.
         try:
+            operations = _parse_changes(request.proposal_diff)
             base_sha = self._get_branch_sha(request.owner, request.repo, request.base_branch)
+            prepared = self._prepare_changes(request.owner, request.repo, base_sha, operations)
+        except PRChangeError as exc:
+            return DraftPRResult(created=False, error=str(exc))
+        except Exception as exc:
+            return DraftPRResult(
+                created=False,
+                error=f"GitHub API error: {type(exc).__name__}: {exc}",
+            )
+
+        # 2. Branch from the same commit the files were read from, commit, open the draft PR.
+        branch_created = False
+        try:
             self._create_branch(request.owner, request.repo, branch, base_sha)
-            for path, content in file_ops.items():
-                self._put_file(
-                    request.owner, request.repo, branch, path, content,
-                    f"[agent] {title}",
-                )
+            branch_created = True
+            message = f"[agent] {title}"
+            for change in prepared:
+                if change.kind == "delete":
+                    self._delete_file(
+                        request.owner, request.repo, branch, change.path, message, change.blob_sha,
+                    )
+                else:
+                    self._put_file(
+                        request.owner, request.repo, branch, change.path, change.content,
+                        message, sha=change.blob_sha,
+                    )
             pr_url, pr_number = self._open_pr(
                 request.owner, request.repo, branch, request.base_branch,
                 title, body,
             )
         except Exception as exc:
+            error = f"GitHub API error: {type(exc).__name__}: {exc}"
+            if branch_created:
+                if self._delete_branch_quietly(request.owner, request.repo, branch):
+                    error += f" (the branch {branch} was removed)"
+                else:
+                    error += f" (the branch {branch} could not be removed; delete it by hand)"
             return DraftPRResult(
                 created=False,
-                error=f"GitHub API error: {type(exc).__name__}: {exc}",
+                error=error,
                 branch=branch,
                 title=title,
                 body=body,
@@ -205,13 +364,18 @@ class GitHubDraftPRService:
         json_body: dict | None = None,
     ) -> dict:
         url = f"{self._base_url}{path}"
-        with httpx.Client(timeout=self._timeout) as client:
+        if self._transport is not None:
+            client = httpx.Client(timeout=self._timeout, transport=self._transport)
+        else:
+            client = httpx.Client(timeout=self._timeout, verify=_make_ssl_context())
+        with client:
             response = client.request(
                 method, url, headers=self._headers(), json=json_body,
             )
         if response.status_code >= 400:
-            raise RuntimeError(
-                f"GitHub {response.status_code} on {method} {path}: {response.text[:200]}"
+            raise GitHubHTTPError(
+                response.status_code,
+                f"GitHub {response.status_code} on {method} {path}: {response.text[:200]}",
             )
         if response.text:
             return response.json()
@@ -235,16 +399,93 @@ class GitHubDraftPRService:
         self,
         owner: str, repo: str, branch: str,
         path: str, content: str, message: str,
+        *,
+        sha: str | None = None,
     ) -> None:
         encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+        payload = {
+            "message": message,
+            "content": encoded,
+            "branch": branch,
+        }
+        if sha:
+            payload["sha"] = sha  # required by GitHub when a file already exists
         self._request(
-            "PUT", f"/repos/{owner}/{repo}/contents/{path.lstrip('/')}",
-            json_body={
-                "message": message,
-                "content": encoded,
-                "branch": branch,
-            },
+            "PUT", f"/repos/{owner}/{repo}/contents/{quote(path.lstrip('/'), safe='/')}",
+            json_body=payload,
         )
+
+    def _delete_file(
+        self,
+        owner: str, repo: str, branch: str,
+        path: str, message: str, sha: str,
+    ) -> None:
+        self._request(
+            "DELETE", f"/repos/{owner}/{repo}/contents/{quote(path.lstrip('/'), safe='/')}",
+            json_body={"message": message, "sha": sha, "branch": branch},
+        )
+
+    def _delete_branch_quietly(self, owner: str, repo: str, branch: str) -> bool:
+        """Best effort clean-up of a branch we made. Returns True when it is gone."""
+        try:
+            self._request("DELETE", f"/repos/{owner}/{repo}/git/refs/heads/{branch}")
+            return True
+        except Exception:
+            return False
+
+    def _get_file(self, owner: str, repo: str, path: str, ref: str):
+        """Return (blob_sha, text) of a file at a commit, or None if it does not exist."""
+        try:
+            data = self._request(
+                "GET",
+                f"/repos/{owner}/{repo}/contents/{quote(path, safe='/')}?ref={quote(ref, safe='')}",
+            )
+        except GitHubHTTPError as exc:
+            if exc.status == 404:
+                return None
+            raise
+        if not isinstance(data, dict) or data.get("type") != "file":
+            raise PRChangeError(f"{path} is not a regular file in the repository.")
+        if int(data.get("size") or 0) > MAX_FILE_BYTES:
+            raise PRChangeError(f"{path} is too large to change here (over {MAX_FILE_BYTES} bytes).")
+        encoded = data.get("content") or ""
+        if data.get("encoding") != "base64" or (not encoded and int(data.get("size") or 0) > 0):
+            raise PRChangeError(f"GitHub did not return the content of {path}.")
+        try:
+            text = base64.b64decode(encoded).decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise PRChangeError(f"{path} is not a UTF-8 text file.") from exc
+        return str(data.get("sha", "")), text
+
+    def _prepare_changes(self, owner: str, repo: str, base_sha: str, operations: list) -> list:
+        """Read each file at `base_sha` and compute its new content. Creates nothing."""
+        prepared: list = []
+        for op in operations:
+            existing = self._get_file(owner, repo, op.path, base_sha)
+            if op.kind == "add":
+                if existing is not None:
+                    raise PRChangeError(
+                        f"The diff creates {op.path}, but that file already exists in the repository."
+                    )
+                content = _apply(op, "")
+                prepared.append(PreparedChange("add", op.path, content, None))
+                continue
+            if existing is None:
+                verb = "deletes" if op.kind == "delete" else "changes"
+                raise PRChangeError(
+                    f"The diff {verb} {op.path}, but that file does not exist in the repository."
+                )
+            blob_sha, text = existing
+            new_text = _apply(op, text)
+            if op.kind == "delete":
+                if new_text.strip():
+                    raise PRChangeError(
+                        f"The diff deletes {op.path}, but its removed lines do not cover the whole file."
+                    )
+                prepared.append(PreparedChange("delete", op.path, None, blob_sha))
+            else:
+                prepared.append(PreparedChange("modify", op.path, new_text, blob_sha))
+        return prepared
 
     def _open_pr(
         self,

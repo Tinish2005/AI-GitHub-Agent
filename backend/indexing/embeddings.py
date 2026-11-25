@@ -73,6 +73,17 @@ class EmbeddingService:
         self._backend: SupportsEncode | None = backend
 
     @property
+    def active_model_name(self) -> str:
+        """Name of the model that really produced the vectors.
+
+        A backend can report its own `model_name` (the Gemini backend does,
+        once it has picked a model); otherwise this is `model_name`.
+        """
+        if self._backend is None:
+            return self.model_name
+        return str(getattr(self._backend, "model_name", None) or self.model_name)
+
+    @property
     def backend(self) -> SupportsEncode:
         """Lazily resolve the backend (real model or injected fake)."""
         if self._backend is None:

@@ -1,0 +1,12 @@
+{
+  "repo": "psf/requests",
+  "commit": "611c6162cbc4ac2020a2f91c7cfa4f3abf9bbb60",
+  "chunks": 283,
+  "files": 16,
+  "dimension": 3072,
+  "model": "models/gemini-embedding-001",
+  "built_at": "2026-10-19T11:23:18+00:00",
+  "include": "src/",
+  "branch": "main",
+  "files_indexed": 19
+}

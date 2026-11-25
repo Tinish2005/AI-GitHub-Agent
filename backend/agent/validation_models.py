@@ -23,6 +23,16 @@ class CheckResult(BaseModel):
     skipped: bool = Field(default=False, description="True when the check was intentionally skipped.")
 
 
+class RepoTarget(BaseModel):
+    """Which GitHub repo (and branch, tag or commit) a patch should be checked against."""
+
+    model_config = {"frozen": True}
+
+    owner: str = Field(min_length=1)
+    repo: str = Field(min_length=1)
+    ref: str | None = Field(default=None, description="Branch, tag or commit. Default branch if empty.")
+
+
 class ValidationResult(BaseModel):
     """Aggregate result of running the whole ValidationPipeline."""
 
@@ -33,6 +43,11 @@ class ValidationResult(BaseModel):
     passed: bool = Field(description="True when all non-skipped checks passed.")
     score: float = Field(ge=0.0, le=1.0, description="Fraction of non-skipped checks that passed.")
     error: str = Field(default="", description="Fatal error, if the pipeline aborted early.")
+    base_commit: str = Field(default="", description="Commit SHA the patch was checked against, if any.")
+    base_description: str = Field(default="", description="What the patch was checked against, in plain words.")
+    diff_sha256: str = Field(default="", description="SHA-256 of the diff that was checked.")
+    diff_source: str = Field(default="", description='"reviewed" (sent by the client) or "regenerated" (made by the server).')
+    warning: str = Field(default="", description="Something the user should know about how this result was made.")
 
     @field_validator("score")
     @classmethod

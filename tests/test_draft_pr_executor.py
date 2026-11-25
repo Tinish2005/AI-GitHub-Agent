@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from backend.agent.draft_pr_service import FakeDraftPRService
-from backend.agent.executor import DraftPRExecutor, StepContext
+from backend.agent.executor import DraftPRExecutor, StepContext, StepSkipped
 from backend.agent.fix_models import FixHunk, FixProposal
 from backend.agent.models import PlanStep, StepKind
 from backend.agent.validation_checks import SyntaxCheck
@@ -87,8 +87,8 @@ def test_executor_needs_proposal() -> None:
         owner="Tinish2005", repo="AI-GitHub-Agent",
     )
     ctx = StepContext(goal="x", step=_step(), prior_outputs={})
-    out = ex.run(ctx)
-    assert "no FixProposal" in out
+    with pytest.raises(StepSkipped, match="no fix proposal"):
+        ex.run(ctx)
 
 
 def test_executor_needs_validation() -> None:
@@ -100,8 +100,8 @@ def test_executor_needs_validation() -> None:
         goal="x", step=_step(),
         prior_outputs={"fix_proposal": _proposal()},
     )
-    out = ex.run(ctx)
-    assert "no ValidationResult" in out
+    with pytest.raises(StepSkipped, match="no validation result"):
+        ex.run(ctx)
 
 
 def test_executor_rejects_missing_owner() -> None:

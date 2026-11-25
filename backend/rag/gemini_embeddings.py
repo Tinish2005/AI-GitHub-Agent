@@ -1,4 +1,4 @@
-﻿"""
+"""
 Gemini-backed embedding backend with throttling + retry.
 
 Avoids torch entirely (torch has no Python 3.14 support). Respects the
@@ -18,16 +18,35 @@ CANDIDATE_MODELS = [
 ]
 
 
+def _normalize_model(name: str | None) -> str | None:
+    text = (name or "").strip()
+    if not text:
+        return None
+    return text if text.startswith("models/") else f"models/{text}"
+
+
 class GeminiEmbeddingBackend:
     """Embeds text via the Gemini embedding API, one item at a time."""
 
-    def __init__(self, api_key: str, *, delay_seconds: float = 0.7) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        delay_seconds: float = 0.7,
+        model: str | None = None,
+    ) -> None:
         if not api_key:
             raise ValueError("Gemini API key must not be empty.")
         self._api_key = api_key
         self._delay = delay_seconds
         self._genai = None
-        self._model = None
+        # A pinned model is used as is: no trying other models, no fallback.
+        self._model = _normalize_model(model)
+
+    @property
+    def model_name(self) -> str | None:
+        """The embedding model in use (None until one has been picked)."""
+        return self._model
 
     def _ensure(self):
         if self._genai is None:

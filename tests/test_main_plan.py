@@ -25,7 +25,8 @@ def test_plan_endpoint_default_strategy(client: TestClient) -> None:
     assert body["goal"] == "Fix the login bug"
     assert body["strategy"] == "rule_based"
     assert len(body["steps"]) > 0
-    assert body["steps"][-1]["kind"] == "draft_pr"
+    assert body["steps"][-1]["kind"] == "validate"
+    assert "draft_pr" not in [s["kind"] for s in body["steps"]]
 
 
 def test_plan_endpoint_llm_strategy_falls_back(client: TestClient) -> None:

@@ -14,7 +14,8 @@ def test_create_plan_tool_returns_summary() -> None:
     assert "Plan for goal:" in out
     assert "Steps" in out
     assert "[retrieve]" in out
-    assert "[draft_pr]" in out
+    assert "[validate]" in out
+    assert "[draft_pr]" not in out
 
 
 def test_create_plan_tool_requires_goal() -> None:

@@ -19,7 +19,13 @@ from __future__ import annotations
 
 import json
 
-from backend.agent.fix_models import FixHunk, FixProposal
+from backend.agent.fix_models import (
+    FixHunk,
+    FixProposal,
+    ReviewedDiffError,
+    ReviewedProposal,
+    diff_fingerprint,
+)
 from backend.rag.llm import LLMClient
 
 
@@ -60,7 +66,9 @@ class FixGenerator:
             )
 
         explanation = str(parsed.get("explanation", "")).strip()
-        diff = str(parsed.get("diff", "")).strip()
+        # Strip only blank lines at the ends. A diff may end with a blank context line
+        # (a single space), and stripping spaces too would cut the hunk short.
+        diff = str(parsed.get("diff", "")).strip("\r\n")
         raw_conf = parsed.get("confidence", 0.5)
         try:
             confidence = float(raw_conf)
@@ -149,3 +157,28 @@ class FixGenerator:
                 )
             )
         return tuple(hunks), True, ""
+
+
+def proposal_from_reviewed(reviewed: ReviewedProposal) -> FixProposal:
+    """Rebuild a FixProposal from a diff the user reviewed.
+
+    The diff is used exactly as sent. The server checks it again itself and does
+    not trust any "valid" flag from the client. If the client sent a fingerprint
+    that does not match the diff, the diff changed after review and is refused.
+    """
+    claimed = (reviewed.diff_sha256 or "").strip().lower()
+    if claimed and claimed != diff_fingerprint(reviewed.diff):
+        raise ReviewedDiffError(
+            "The diff does not match its diff_sha256: it changed after it was reviewed."
+        )
+    hunks, is_valid, error = FixGenerator._validate_diff(reviewed.diff)
+    return FixProposal(
+        goal=reviewed.goal,
+        explanation=reviewed.explanation,
+        diff=reviewed.diff,
+        hunks=hunks,
+        model=reviewed.model,
+        confidence=reviewed.confidence,
+        is_valid=is_valid,
+        validation_error=error,
+    )

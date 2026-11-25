@@ -5,8 +5,12 @@ Takes a Plan and runs each step in order. For each step:
     - Picks the matching StepExecutor by kind
     - Calls executor.run(context) with the accumulated prior outputs
     - Captures the result, marks the step COMPLETED
-    - On failure, retries once; if still failing, marks FAILED and
-      either continues or aborts depending on the abort_on_failure flag
+    - If the executor raises StepSkipped (missing input or not configured),
+      marks the step SKIPPED with the reason. Skipped is not a failure:
+      it is not retried and it never aborts the run
+    - On any other error, retries up to max_retries attempts; if still
+      failing, marks FAILED and either continues or aborts depending on
+      the abort_on_failure flag
 
 Returns a typed ExecutionResult with per-step results and a top-level
 status. Future work can add replanning; today we ship the "run + report"
@@ -17,7 +21,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from backend.agent.executor import StepContext, StepExecutor
+from backend.agent.executor import StepContext, StepExecutor, StepSkipped
 from backend.agent.models import Plan, PlanStep, StepKind, StepStatus
 
 
@@ -44,6 +48,7 @@ class ExecutionResult(BaseModel):
     steps: tuple = Field(default_factory=tuple)
     completed: int = Field(ge=0, default=0)
     failed: int = Field(ge=0, default=0)
+    skipped: int = Field(ge=0, default=0)
     aborted: bool = Field(default=False)
 
     @property
@@ -69,15 +74,19 @@ class ExecutionEngine:
         self.max_retries = max_retries
         self.abort_on_failure = abort_on_failure
 
-    def run(self, plan: Plan) -> ExecutionResult:
-        """Execute the whole plan; return a structured result."""
+    def run(self, plan: Plan, *, initial_outputs: dict | None = None) -> ExecutionResult:
+        """Execute the whole plan; return a structured result.
+
+        `initial_outputs` seeds the data shared between steps (for example the
+        repository the VALIDATE step should check against).
+        """
         if plan.step_count == 0:
             return ExecutionResult(
                 goal=plan.goal, strategy=plan.strategy, steps=(), completed=0, failed=0,
             )
 
         results: list = []
-        prior_outputs: dict = {}
+        prior_outputs: dict = dict(initial_outputs or {})
         aborted = False
 
         for step in plan.steps:
@@ -99,6 +108,7 @@ class ExecutionEngine:
 
         completed = sum(1 for r in results if r.status == StepStatus.COMPLETED)
         failed = sum(1 for r in results if r.status == StepStatus.FAILED)
+        skipped = sum(1 for r in results if r.status == StepStatus.SKIPPED)
 
         return ExecutionResult(
             goal=plan.goal,
@@ -106,6 +116,7 @@ class ExecutionEngine:
             steps=tuple(results),
             completed=completed,
             failed=failed,
+            skipped=skipped,
             aborted=aborted,
         )
 
@@ -131,6 +142,11 @@ class ExecutionEngine:
                 return StepResult(
                     step_id=step.id, kind=step.kind, status=StepStatus.COMPLETED,
                     output=output, attempts=attempt,
+                )
+            except StepSkipped as skip:
+                return StepResult(
+                    step_id=step.id, kind=step.kind, status=StepStatus.SKIPPED,
+                    error=str(skip), attempts=attempt,
                 )
             except Exception as exc:
                 last_error = f"{type(exc).__name__}: {exc}"

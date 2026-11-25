@@ -44,12 +44,18 @@ class RAGPipeline:
         self.top_k = top_k
         self.budget_chars = budget_chars
 
-    def ask(self, question: str) -> Answer:
-        """Run the full retrieve → assemble → answer flow."""
+    def ask(self, question: str, *, repo: str | None = None) -> Answer:
+        """Run the full retrieve → assemble → answer flow.
+
+        With `repo` ("owner/name") only that repo's chunks are searched.
+        """
         if not question or not question.strip():
             raise ValueError("Question must not be empty.")
 
-        results = self.vector_store.query(question, top_k=self.top_k)
+        if repo:
+            results = self.vector_store.query(question, top_k=self.top_k, repo=repo)
+        else:
+            results = self.vector_store.query(question, top_k=self.top_k)
         context = assemble_context(results, budget_chars=self.budget_chars)
         user_prompt = self._build_user_prompt(question, context)
         answer_text = self.llm.complete(SYSTEM_PROMPT, user_prompt)

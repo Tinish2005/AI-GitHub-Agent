@@ -12,6 +12,7 @@ from backend.agent.executor import (
     PlannedExecutor,
     RetrieveExecutor,
     StepContext,
+    StepSkipped,
     make_default_executors,
 )
 from backend.agent.models import PlanStep, StepKind
@@ -82,10 +83,10 @@ def test_analyze_executor_returns_answer(pipeline: RAGPipeline) -> None:
     assert "sources:" in out
 
 
-def test_github_read_executor_no_coord_returns_message() -> None:
+def test_github_read_executor_no_coord_is_skipped() -> None:
     ex = GitHubReadExecutor(FakeGitHubClient(), coord=None)
-    out = ex.run(_ctx())
-    assert "no repository was configured" in out.lower()
+    with pytest.raises(StepSkipped, match="no repository was configured"):
+        ex.run(_ctx())
 
 
 def test_github_read_executor_lists_issues() -> None:
@@ -100,11 +101,12 @@ def test_github_read_executor_lists_issues() -> None:
     assert "o/r" in out
 
 
-def test_planned_executor_reports_note() -> None:
+def test_planned_executor_is_skipped_with_note() -> None:
     ex = PlannedExecutor(StepKind.VALIDATE, "later")
-    out = ex.run(_ctx())
-    assert "[planned]" in out
-    assert "validate" in out
+    with pytest.raises(StepSkipped) as info:
+        ex.run(_ctx())
+    assert "[planned]" in str(info.value)
+    assert "validate" in str(info.value)
 
 
 def test_make_default_executors_covers_all_kinds(

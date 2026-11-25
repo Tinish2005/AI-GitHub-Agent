@@ -48,3 +48,6 @@ class DraftPRResult(BaseModel):
     body: str = Field(default="", description="Body used for the PR.")
     error: str = Field(default="", description="Reason the PR was NOT created, if any.")
     skipped_reason: str = Field(default="", description="Reason we deliberately skipped creating the PR.")
+    diff_sha256: str = Field(default="", description="SHA-256 of the diff that was validated and submitted.")
+    diff_source: str = Field(default="", description='"reviewed" (sent by the client) or "regenerated" (made by the server).')
+    warning: str = Field(default="", description="Something the user should know about how this result was made.")

@@ -22,13 +22,17 @@ def test_planner_strategy_label() -> None:
     assert plan.strategy == "rule_based"
 
 
-def test_fix_bug_plan_ends_with_draft_pr() -> None:
+def test_fix_bug_plan_ends_with_validate() -> None:
+    # Loop 5: approval and the draft PR are no longer plan steps (Execute cannot run them).
     p = RuleBasedPlanner()
     plan = p.plan("Fix the login bug that crashes on empty password")
     assert plan.steps[0].kind == StepKind.RETRIEVE
-    assert plan.steps[-1].kind == StepKind.DRAFT_PR
-    assert StepKind.VALIDATE in plan.kinds()
-    assert StepKind.HUMAN_APPROVAL in plan.kinds()
+    assert plan.steps[-1].kind == StepKind.VALIDATE
+    assert plan.kinds() == (
+        StepKind.RETRIEVE, StepKind.ANALYZE, StepKind.GENERATE, StepKind.VALIDATE,
+    )
+    assert StepKind.HUMAN_APPROVAL not in plan.kinds()
+    assert StepKind.DRAFT_PR not in plan.kinds()
 
 
 def test_review_plan_has_retrieve_and_analyze() -> None:
@@ -43,11 +47,11 @@ def test_github_plan_reads_github_first() -> None:
     assert plan.steps[0].kind == StepKind.GITHUB_READ
 
 
-def test_pr_plan_ends_with_draft_pr() -> None:
+def test_pr_plan_ends_with_validate() -> None:
     p = RuleBasedPlanner()
     plan = p.plan("Propose a small PR that adds type hints")
-    assert plan.steps[-1].kind == StepKind.DRAFT_PR
-    assert StepKind.VALIDATE in plan.kinds()
+    assert plan.steps[-1].kind == StepKind.VALIDATE
+    assert StepKind.DRAFT_PR not in plan.kinds()
 
 
 def test_default_plan_is_qa_shape() -> None:

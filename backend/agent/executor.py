@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from backend.agent.models import PlanStep, StepKind
+from backend.agent.repo_context import format_chunks, retrieve_repo_context
 from backend.github.client import GitHubAPI
 from backend.github.models import RepoCoord
 from backend.indexing.vector_store import VectorStore
@@ -15,6 +16,36 @@ from backend.agent.validation_pipeline import ValidationPipeline
 from backend.agent.validation_models import ValidationResult
 from backend.agent.draft_pr_models import DraftPRRequest, DraftPRResult
 from backend.agent.draft_pr_service import DraftPRService
+
+
+# Keys used to hand results from one step to the next (stored in prior_outputs).
+FIX_PROPOSAL_KEY = "fix_proposal"
+VALIDATION_RESULT_KEY = "validation_result"
+# Full text of the retrieved code chunks (set by the RETRIEVE step).
+REPO_CONTEXT_KEY = "repo_context"
+# Which GitHub repo the VALIDATE step should check the patch against (a RepoTarget).
+REPO_TARGET_KEY = "repo_target"
+
+# Line that introduces the diff inside the GENERATE step's output.
+PATCH_MARKER = "Patch (unified diff):"
+
+
+def _repo_scope(prior_outputs: dict) -> str | None:
+    """"owner/name" of the repo this run is about, if the request named one."""
+    target = prior_outputs.get(REPO_TARGET_KEY)
+    if target is None:
+        return None
+    return f"{target.owner}/{target.repo}"
+
+
+class StepSkipped(Exception):
+    """Raised by an executor that cannot do its job.
+
+    Use it when an input is missing or the step is not configured. The
+    engine records the step as SKIPPED and shows the message as the reason.
+    A skipped step is not a failure, so it is never retried and it does
+    not abort the run.
+    """
 
 
 @dataclass(frozen=True)
@@ -47,7 +78,13 @@ class RetrieveExecutor:
         self.top_k = top_k
 
     def run(self, context: StepContext) -> str:
-        results = self.vector_store.query(context.goal, top_k=self.top_k)
+        scope = _repo_scope(context.prior_outputs)
+        if scope:
+            results = self.vector_store.query(context.goal, top_k=self.top_k, repo=scope)
+        else:
+            results = self.vector_store.query(context.goal, top_k=self.top_k)
+        # Keep the real code for later steps (GENERATE). Empty if nothing found.
+        context.prior_outputs[REPO_CONTEXT_KEY] = format_chunks(results) if results else ""
         if not results:
             return "No matching chunks found for the goal."
         lines = [f"Retrieved {len(results)} chunks:"]
@@ -68,7 +105,11 @@ class AnalyzeExecutor:
         self.pipeline = pipeline
 
     def run(self, context: StepContext) -> str:
-        answer = self.pipeline.ask(context.goal)
+        scope = _repo_scope(context.prior_outputs)
+        answer = (
+            self.pipeline.ask(context.goal, repo=scope)
+            if scope else self.pipeline.ask(context.goal)
+        )
         return f"{answer.answer}\n\n(sources: {answer.source_count})"
 
 
@@ -82,56 +123,80 @@ class GitHubReadExecutor:
         self.coord = coord
 
     def run(self, context: StepContext) -> str:
-        if self.coord is None:
-            return (
+        # The repo named in the request wins; a repo set on the server is the fallback.
+        target = context.prior_outputs.get(REPO_TARGET_KEY)
+        coord = RepoCoord(owner=target.owner, repo=target.repo) if target is not None else self.coord
+        if coord is None:
+            raise StepSkipped(
                 "GitHub read requested but no repository was configured. "
-                "Wire a RepoCoord into the engine to enable live reads."
+                "Send owner and repo with the request to enable it."
             )
         try:
-            issues = self.github.list_issues(self.coord, state="open", per_page=5)
+            issues = self.github.list_issues(coord, state="open", per_page=5)
         except Exception as exc:
             raise RuntimeError(f"GitHub read failed: {exc}") from exc
         if not issues:
-            return f"No open issues in {self.coord.slug()}."
-        lines = [f"Open issues in {self.coord.slug()}:"]
+            return f"No open issues in {coord.slug()}."
+        lines = [f"Open issues in {coord.slug()}:"]
         for issue in issues:
             lines.append(f"  #{issue.number}  {issue.title}  (by {issue.author})")
         return "\n".join(lines)
 
 
 class GenerateExecutor:
-    """Runs FixGenerator using the goal and prior RETRIEVE output."""
+    """Runs FixGenerator using the goal and real repository code.
+
+    The code comes from the RETRIEVE step. If that step did not run, the
+    executor searches the repository itself (same method as /fix/propose).
+    """
 
     kind: StepKind = StepKind.GENERATE
 
-    def __init__(self, generator: FixGenerator) -> None:
+    def __init__(
+        self,
+        generator: FixGenerator,
+        vector_store: VectorStore | None = None,
+        *,
+        top_k: int = 5,
+    ) -> None:
         self.generator = generator
+        self.vector_store = vector_store
+        self.top_k = top_k
 
     def run(self, context: StepContext) -> str:
-        prior_context = self._pick_context(context.prior_outputs)
-        proposal = self.generator.propose(context.goal, prior_context)
+        repo_context = self._get_repo_context(context)
+        proposal = self.generator.propose(context.goal, repo_context)
+        # Hand the proposal to later steps (validate, draft PR).
+        context.prior_outputs[FIX_PROPOSAL_KEY] = proposal
         head = (
             f"Fix proposal (model={proposal.model}, "
             f"confidence={proposal.confidence:.2f}, "
             f"files_changed={proposal.files_changed}, "
             f"is_valid={proposal.is_valid})"
         )
+        if repo_context.strip():
+            context_line = "Context: repository code attached"
+        else:
+            context_line = "Context: none found, proposal is based on the goal only"
         body = proposal.explanation
         if not proposal.is_valid:
             body += f"\n\n[!] Validation error: {proposal.validation_error}"
-        return f"{head}\n\n{body}"
+        return (
+            f"{head}\n{context_line}\nDiff SHA-256: {proposal.diff_sha256}\n\n"
+            f"{body}\n\n{PATCH_MARKER}\n{proposal.diff}"
+        )
 
-    @staticmethod
-    def _pick_context(prior_outputs: dict) -> str:
-        if not prior_outputs:
-            return ""
-        if 1 in prior_outputs:
-            return str(prior_outputs[1])
-        int_keys = [k for k in prior_outputs.keys() if isinstance(k, int)]
-        if not int_keys:
-            return ""
-        latest_id = max(int_keys)
-        return str(prior_outputs[latest_id])
+    def _get_repo_context(self, context: StepContext) -> str:
+        saved = context.prior_outputs.get(REPO_CONTEXT_KEY)
+        if saved is not None:
+            # The RETRIEVE step already searched (the text may be empty).
+            return saved
+        if self.vector_store is not None:
+            return retrieve_repo_context(
+                self.vector_store, context.goal, top_k=self.top_k,
+                repo=_repo_scope(context.prior_outputs),
+            )
+        return ""
 
 
 class ValidateExecutor:
@@ -143,16 +208,28 @@ class ValidateExecutor:
         self.pipeline = pipeline
 
     def run(self, context: StepContext) -> str:
-        proposal = context.prior_outputs.get("fix_proposal")
+        proposal = context.prior_outputs.get(FIX_PROPOSAL_KEY)
         if proposal is None:
-            return "[validate] no FixProposal found in prior outputs; skipping."
-        result: ValidationResult = self.pipeline.validate(proposal)
+            raise StepSkipped(
+                "no fix proposal from an earlier step, so there is nothing to validate."
+            )
+        repo = context.prior_outputs.get(REPO_TARGET_KEY)
+        if repo is not None:
+            result: ValidationResult = self.pipeline.validate(proposal, repo=repo)
+        else:
+            result = self.pipeline.validate(proposal)
+        # Hand the result to later steps (draft PR).
+        context.prior_outputs[VALIDATION_RESULT_KEY] = result
         head = (
             f"Validation (passed={result.passed}, "
             f"score={result.score:.2f}, "
             f"checks={result.total_checks})"
         )
         lines = [head]
+        if result.base_description:
+            lines.append(f"Checked against: {result.base_description}")
+        if result.diff_sha256:
+            lines.append(f"Checked diff SHA-256: {result.diff_sha256}")
         if result.error:
             lines.append(f"[!] fatal: {result.error}")
         for c in result.checks:
@@ -182,12 +259,16 @@ class DraftPRExecutor:
         self.base_branch = base_branch
 
     def run(self, context: StepContext) -> str:
-        proposal = context.prior_outputs.get("fix_proposal")
-        validation = context.prior_outputs.get("validation_result")
+        proposal = context.prior_outputs.get(FIX_PROPOSAL_KEY)
+        validation = context.prior_outputs.get(VALIDATION_RESULT_KEY)
         if proposal is None:
-            return "[draft_pr] no FixProposal in prior outputs; skipping."
+            raise StepSkipped(
+                "no fix proposal from an earlier step, so there is nothing to open a pull request for."
+            )
         if validation is None:
-            return "[draft_pr] no ValidationResult in prior outputs; skipping."
+            raise StepSkipped(
+                "no validation result from an earlier step; validate the fix first."
+            )
         request = DraftPRRequest(
             owner=self.owner,
             repo=self.repo,
@@ -214,14 +295,14 @@ class DraftPRExecutor:
 
 
 class PlannedExecutor:
-    """A honest not-yet-implemented executor placeholder."""
+    """An honest not-yet-implemented executor placeholder. Always reports SKIPPED."""
 
     def __init__(self, kind: StepKind, note: str) -> None:
         self.kind = kind
         self.note = note
 
     def run(self, context: StepContext) -> str:
-        return f"[planned] {self.kind.value}: {self.note}"
+        raise StepSkipped(f"[planned] {self.kind.value}: {self.note}")
 
 
 def make_default_executors(
@@ -249,7 +330,7 @@ def make_default_executors(
             "no GitHub client configured on this server.",
         )
     if generator is not None:
-        executors[StepKind.GENERATE] = GenerateExecutor(generator)
+        executors[StepKind.GENERATE] = GenerateExecutor(generator, vector_store=vector_store)
     else:
         executors[StepKind.GENERATE] = PlannedExecutor(
             StepKind.GENERATE, "wire a FixGenerator to enable diff generation.",

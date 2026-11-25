@@ -96,7 +96,11 @@ def test_add_chunks_with_metadata(store: VectorStore, tmp_path: Path) -> None:
     chunks = parse_source(SAMPLE_SOURCE, f)
     metas = extract_metadata_for_chunks(chunks, project_root=tmp_path)
     ids = store.add_chunks(chunks, metas)
-    assert ids == [m.content_hash for m in metas]
+    # Ids are no longer the content hash (identical code in two places must stay
+    # separate), but the content hash is still saved with each chunk.
+    assert len(ids) == len(set(ids)) == len(chunks)
+    assert all(len(i) == 64 for i in ids)
+    assert [m["content_hash"] for m in store.all_metadata()] == [m.content_hash for m in metas]
 
 
 def test_add_chunks_rejects_mismatched_metadata(store: VectorStore) -> None:

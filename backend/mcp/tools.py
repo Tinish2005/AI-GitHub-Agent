@@ -82,7 +82,11 @@ def make_search_code_tool(store: VectorStore) -> Tool:
 
         
         
-        results = store.query(query, top_k=top_k)
+        repo = str(params.get("repo", "") or "").strip()
+        results = (
+            store.query(query, top_k=top_k, repo=repo) if repo
+            else store.query(query, top_k=top_k)
+        )
         if not results:
             return "No matching chunks found."
 
@@ -104,6 +108,7 @@ def make_search_code_tool(store: VectorStore) -> Tool:
             "properties": {
                 "query": {"type": "string", "description": "Natural-language search query."},
                 "top_k": {"type": "integer", "minimum": 1, "maximum": 20, "default": 5},
+                "repo": {"type": "string", "description": "Optional: only search this repo (owner/name)."},
             },
             "required": ["query"],
         },
@@ -160,10 +165,11 @@ def make_ask_codebase_tool(pipeline: RAGPipeline) -> Tool:
         if top_k < 1 or top_k > 20:
             raise ValueError("Param 'top_k' must be between 1 and 20.")
 
+        repo = str(params.get("repo", "") or "").strip()
         original_top_k = pipeline.top_k
         try:
             pipeline.top_k = top_k
-            answer = pipeline.ask(question)
+            answer = pipeline.ask(question, repo=repo) if repo else pipeline.ask(question)
         finally:
             pipeline.top_k = original_top_k
 
@@ -182,6 +188,7 @@ def make_ask_codebase_tool(pipeline: RAGPipeline) -> Tool:
             "properties": {
                 "question": {"type": "string", "description": "The natural-language question."},
                 "top_k": {"type": "integer", "minimum": 1, "maximum": 20, "default": 5},
+                "repo": {"type": "string", "description": "Optional: only search this repo (owner/name)."},
             },
             "required": ["question"],
         },
@@ -424,13 +431,15 @@ def make_execute_plan_tool(planner: Planner, engine: ExecutionEngine) -> Tool:
         lines = [
             f"Goal: {result.goal}",
             f"Strategy: {result.strategy}",
-            f"Steps: {result.total_steps}  Completed: {result.completed}  Failed: {result.failed}  Aborted: {result.aborted}",
+            f"Steps: {result.total_steps}  Completed: {result.completed}  Failed: {result.failed}  Skipped: {result.skipped}  Aborted: {result.aborted}",
             "",
         ]
         for r in result.steps:
             head = f"[{r.status.value}] step {r.step_id} ({r.kind.value})"
             if r.status.value == "failed":
                 lines.append(f"{head} - error: {r.error}")
+            elif r.status.value == "skipped":
+                lines.append(f"{head} - {r.error}")
             else:
                 short = r.output.splitlines()[0][:120] if r.output else "(no output)"
                 lines.append(f"{head} - {short}")

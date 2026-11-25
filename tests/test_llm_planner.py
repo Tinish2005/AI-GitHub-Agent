@@ -55,7 +55,7 @@ def test_llm_planner_falls_back_on_bad_json() -> None:
     plan = planner.plan("Fix the login bug")
     # Fallback plan should be from RuleBasedPlanner - fix-bug template.
     assert plan.strategy == "rule_based"
-    assert plan.steps[-1].kind == StepKind.DRAFT_PR
+    assert plan.steps[-1].kind == StepKind.VALIDATE
 
 
 def test_llm_planner_falls_back_on_missing_steps() -> None:

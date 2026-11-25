@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from backend.agent.executor import GenerateExecutor, StepContext
+from backend.agent.executor import REPO_CONTEXT_KEY, GenerateExecutor, StepContext
 from backend.agent.fix_generator import FixGenerator
 from backend.agent.models import PlanStep, StepKind
 
@@ -52,7 +52,7 @@ def test_generate_executor_returns_summary_text() -> None:
     assert "is_valid=True" in out
 
 
-def test_generate_executor_uses_retrieve_output_as_context() -> None:
+def test_generate_executor_uses_saved_repo_context() -> None:
     captured: dict = {}
 
     class SpyGen:
@@ -71,11 +71,16 @@ def test_generate_executor_uses_retrieve_output_as_context() -> None:
     ctx = StepContext(
         goal="my goal",
         step=_step(),
-        prior_outputs={1: "retrieval-output-1", 2: "analyze-output-2"},
+        prior_outputs={
+            REPO_CONTEXT_KEY: "[1] add (sample.py)\ndef add(a, b): return a + b",
+            1: "Retrieved 1 chunks: summary only",
+            2: "analyze-output-2",
+        },
     )
     ex.run(ctx)
     assert captured["goal"] == "my goal"
-    assert captured["context"] == "retrieval-output-1"
+    # The generator gets the real code, not the step summary text.
+    assert captured["context"] == "[1] add (sample.py)\ndef add(a, b): return a + b"
 
 
 def test_generate_executor_reports_invalid_diff() -> None:
